@@ -61,13 +61,40 @@ def test_measured_headroom_is_comfortable():
     assert tol / max(err, 1e-12) > 100, f"余量仅 {tol / max(err, 1e-12):.1f} 倍，偏低"
 
 
-def test_fp64_simulation_is_essentially_exact():
-    """FP64 模拟与 golden 应当几乎无差 —— 用于隔离"逻辑错"与"精度不足"。"""
+def test_fp64_simulation_separates_logic_from_precision():
+    """用 FP64 模拟时，偏差应当只来自"累加精度"，而不是切分逻辑。
+
+    这里有个容易误判的点：即便 ``sim_dtype`` 传 FP64，**最终 Sum(M) 仍按 FP32
+    累加**（与真实 kernel 一致，参见 kernel_sim 的说明）。当 M 较大时，
+    FP32 顺序累加 1024 个数的舍入误差约 1e-4 绝对值、1e-7 相对值 —— 这是
+    **正确行为**，不是 bug。所以阈值取 1e-6 而不是 1e-9。
+
+    真正要区分的是：逻辑错（切分/尾块/归约顺序）会带来远大于 1e-6 的偏差。
+    """
     for name in ("k8192_max", "large_square", "tail_mn"):
         c = cases_mod.find_case(name)
         golden = ref.golden_from_case(c)
         actual = simulate_case(c, num_cores=4, base_m=64, base_n=64, sim_dtype=np.float64)
-        assert _rel_err(actual, golden) < 1e-9, f"{name} FP64 模拟不该有明显偏差"
+        err = _rel_err(actual, golden)
+        assert err < 1e-6, (
+            f"{name} FP64 模拟相对偏差 {err:.3e} 超过 1e-6，可能不只是累加精度问题"
+        )
+
+
+def test_fp32_sum_accumulation_error_is_negligible():
+    """确认最终 Sum(M) 的 FP32 累加误差远小于容差 —— 这是它有意的设计。
+
+    M 越大、累加项越多，误差越大。取 M 上界量级的用例验证最坏情况。
+    """
+    c = cases_mod.find_case("m_large_n_small")  # M=2048，Sum 归约最长
+    golden = ref.golden_from_case(c)
+    actual = simulate_case(c, num_cores=4, base_m=64, base_n=64)
+    err = _rel_err(actual, golden)
+
+    tol = ref.TOLERANCES[c["dtypeKey"]][0]
+    assert err < tol / 100, (
+        f"M=2048 时 FP32 累加误差 {err:.3e}，相对容差 {tol:.0e} 余量不足 100 倍"
+    )
 
 
 def test_fp32_error_grows_with_k():
@@ -101,3 +128,60 @@ def test_all_negative_case_precision_is_exact():
 
     assert np.array_equal(y32, y64), f"FP32={y32} 与 FP64={y64} 不一致"
     assert y32[0] == pytest.approx(-1.0)
+
+
+# ------------------------------------------------- 测试判别力（受保护的属性）
+
+
+def _rel(a: np.ndarray, b: np.ndarray) -> float:
+    a64, b64 = a.astype(np.float64), b.astype(np.float64)
+    return float(np.max(np.abs(a64 - b64) / np.maximum(np.abs(b64), 1e-6)))
+
+
+def test_suite_detects_wrong_reduction_order():
+    """判别力：归约顺序写成 Sum->Max 时，绝大多数用例必须能区分。
+
+    这条把"测试确实有区分力"变成受断言保护的性质。若哪天用例被换成
+    过于同质的数据、导致两种归约顺序结果相同，本测试会失败。
+    """
+    distinguishable = 0
+    for c in cases_mod.all_cases():
+        (B, M, K), (_, _, N) = ref.resolve_logical_shape(
+            c["x1"], c["x2"], c["transposeX1"], c["transposeX2"]
+        )
+        x1 = np.transpose(c["x1"], (0, 2, 1)) if c["transposeX1"] else c["x1"]
+        x2 = np.transpose(c["x2"], (0, 2, 1)) if c["transposeX2"] else c["x2"]
+        sim = np.matmul(x1.astype(np.float64), x2.astype(np.float64))
+
+        correct = np.sum(np.max(sim, axis=-1), axis=-1)
+        wrong = np.max(np.sum(sim, axis=-1), axis=-1)
+        if not np.allclose(correct, wrong, rtol=1e-9, atol=1e-9):
+            distinguishable += 1
+
+    assert distinguishable >= len(cases_mod.all_cases()) * 0.9, (
+        f"仅 {distinguishable}/{len(cases_mod.all_cases())} 个用例能区分归约顺序，判别力不足"
+    )
+
+
+def test_suite_detects_zero_initialized_max():
+    """判别力：把 MaxSim 初值错设成 0 时，必须有用例能抓到。
+
+    实测只有"相似度全负"的用例能抓到（其余用例含正值，初值设 0 不出错）。
+    这里断言这类用例存在且确实能区分 —— 赛题 3.7 专门点了这个坑。
+    """
+    caught = []
+    for c in cases_mod.all_cases():
+        (B, M, K), (_, _, N) = ref.resolve_logical_shape(
+            c["x1"], c["x2"], c["transposeX1"], c["transposeX2"]
+        )
+        x1 = np.transpose(c["x1"], (0, 2, 1)) if c["transposeX1"] else c["x1"]
+        x2 = np.transpose(c["x2"], (0, 2, 1)) if c["transposeX2"] else c["x2"]
+        sim = np.matmul(x1.astype(np.float64), x2.astype(np.float64))
+
+        correct = np.sum(np.max(sim, axis=-1), axis=-1)
+        zero_init = np.sum(np.maximum(np.max(sim, axis=-1), 0.0), axis=-1)
+        if not np.allclose(correct, zero_init, rtol=1e-9, atol=1e-9):
+            caught.append(c["name"])
+
+    assert "all_negative_sim" in caught, "赛题示例3 必须能抓到初值设 0 的错误"
+    assert len(caught) >= 2, f"能抓到初值设 0 错误的用例太少: {caught}"
