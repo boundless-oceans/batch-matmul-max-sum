@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 # Ascend Cube 的 baseN 需按分形对齐；fp32 输出下 N 方向以 16 个元素为单位切分。
@@ -117,9 +116,11 @@ def plan_tiling(
     base_m, base_n
         Cube 单次计算的分块尺寸。允许取非对齐值，用于逼出尾块路径。
 
-    分配策略：把 ``B*M`` 行按 ``ceil_div(总行数, 核数)`` 得到每核基础行数，
-    余数依次多分一行给靠前的核，保证行数差最多 1。整批(batch)边界不做对齐
-    处理——每行独立成任务，跨 batch 的行区间在同一核内顺序处理即可。
+    分配策略：从前往后逐核分配，每核取「剩余行数 / 剩余核数」向上取整，
+    因此任意两核的行数差最多 1。整批(batch)边界不做对齐处理——每行独立成任务，
+    跨 batch 的行区间在同一核内顺序处理即可（kernel 侧输出需按 batch 分流）。
+
+    本函数是**行分配规则的唯一实现**，kernel_sim 直接复用它，避免两处逻辑漂移。
     """
     if B <= 0 or M <= 0 or N <= 0 or K <= 0:
         raise ValueError(f"维度必须为正，实际 B={B}, M={M}, N={N}, K={K}")
@@ -129,25 +130,16 @@ def plan_tiling(
         raise ValueError(f"base_m/base_n 必须为正，实际 {base_m}, {base_n}")
 
     total_rows = B * M
-    # 核数多于行数时，多余核分不到工作（num_rows = 0）。这是合法情形，
-    # 例如 B=1, M=1 时只有一个核真正干活。
-    per_core = ceil_div(total_rows, num_cores)
-    remainder = total_rows - per_core * (num_cores - 1)
-    if remainder < 0:
-        # 核数远多于行数：前 (total_rows) 个核各分 1 行，其余 0 行
-        per_core = 1
-
     works: list[CoreWork] = []
     cursor = 0
     for core_id in range(num_cores):
         remaining_cores = num_cores - core_id
         remaining_rows = total_rows - cursor
         if remaining_rows <= 0:
+            # 核数多于行数：多余核分到空任务，不重复计算
             works.append(CoreWork(core_id=core_id, row_start=cursor, row_end=cursor))
             continue
-        # 剩余行数均分给剩余核，向上取整，靠前的核多担一点
-        take = ceil_div(remaining_rows, remaining_cores)
-        take = min(take, remaining_rows)
+        take = min(ceil_div(remaining_rows, remaining_cores), remaining_rows)
         works.append(CoreWork(core_id=core_id, row_start=cursor, row_end=cursor + take))
         cursor += take
 
