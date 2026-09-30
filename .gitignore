@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 裁判导出物与对拍结果（体积大、可随时重建，不进版本库）
+cases_out/
+results/
+*.npz
+*.npy
+*.bin
+
+# CANN / CMake 构建产物
+build/
+build_out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.o
+*.so
+*.a
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
