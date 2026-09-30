@@ -1,0 +1,32 @@
+# BatchMatmulMaxSum 本地开发环境
+#
+# 用途：运行本地裁判（judge/），包括用 torch 对拍 golden 的语义验证测试。
+# 不用于编译/运行 Ascend C 算子——那需要 CANN toolkit 与昇腾 NPU，在本仓库之外进行。
+#
+# 创建：  conda env create -f environment.yml
+# 更新：  conda env update -f environment.yml --prune
+# 激活：  conda activate cann-bmmaxsum
+#
+# 版本选择依据（均已实测核实）：
+#   - python 3.11：torch 官方 CPU 索引提供 cp311 wheel，且该索引没有 cp310。
+#   - torch 2.14.1+cpu：python_requires >=3.10；Linux wheel 为 manylinux_2_28，
+#     需要 glibc >= 2.28。CPU 构建不含 nvidia-* 依赖，避免无谓的 2~3GB 下载。
+#   - numpy 交给 conda 在该环境内独立解析，与本机系统 numpy 互不干扰。
+
+name: cann-bmmaxsum
+
+channels:
+  - conda-forge
+  - nodefaults
+
+dependencies:
+  - python=3.11
+  - numpy>=1.21
+  - pytest>=6.2
+
+  # torch 走 pip：PyTorch 的 CPU 构建只在自有索引上发布，conda 渠道与 PyPI 均无 +cpu 变体。
+  # 此处用 extra-index-url 而非 index-url，保留 PyPI 作为回退，确保依赖可被解析。
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - torch==2.14.1+cpu

@@ -63,9 +63,48 @@ storage shape 而非要求真的转置，四种布局组合都要支持；归约
 | 用途 | 依赖 |
 | :--- | :--- |
 | 跑本地裁判 | Python 3.8+、numpy、pytest |
+| 跑 torch 语义对拍（可选） | torch（CPU 版即可） |
 | 编译/运行算子 | CANN toolkit + 昇腾 NPU（本机不需要，在 CANNLab 上做） |
 
 本地裁判**不需要** torch、不需要 CANN、不需要 NPU。
+torch 仅用于一项可选的交叉验证：用赛题定义的参考算子（`torch.bmm` +
+`torch.amax` + `torch.sum`）对拍本仓库的 golden，确认对赛题语义的解读无误。
+
+### 4.1 用 conda 创建环境
+
+仓库根目录提供了 [`environment.yml`](environment.yml)：
+
+```bash
+conda env create -f environment.yml
+conda activate cann-bmmaxsum
+```
+
+环境内容：Python 3.11、numpy、pytest，以及 **CPU 版 torch**（`2.14.1+cpu`）。
+
+几点说明：
+
+- torch 之所以放在 `pip:` 段而非 conda 依赖里：PyTorch 的 CPU 构建只在自有索引
+  （`download.pytorch.org/whl/cpu`）发布，conda 渠道与 PyPI 都没有 `+cpu` 变体。
+- 装 CPU 版而非默认版，是为了避开 Linux 默认 wheel 携带的 `nvidia-*` 依赖
+  （约 2~3GB），本机无可用 GPU，装了也用不上。
+- Linux wheel 为 `manylinux_2_28`，要求 glibc ≥ 2.28。
+- 不想用 conda 也可以：任选一个 Python 3.10+ 环境，
+  `pip install numpy pytest` 即可跑裁判；torch 按需另装。
+
+### 4.2 验证环境
+
+```bash
+python -c "
+import torch, numpy, pytest, sys
+print('python', sys.version.split()[0])
+print('torch ', torch.__version__)
+print('numpy ', numpy.__version__)
+print('cuda  ', torch.cuda.is_available())
+"
+```
+
+期望看到 torch 版本带 `+cpu` 后缀、`cuda False`。
+
 
 ---
 
