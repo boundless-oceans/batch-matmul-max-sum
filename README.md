@@ -208,6 +208,8 @@ python3 -m judge.runner score --base <拆分实现基线耗时us> --time <当前
 
 ## 8. 注意事项
 
+- 提交信息遵循 [`CONTRIBUTING.md`](CONTRIBUTING.md) 约定的
+  Conventional Commits 格式（`<type>(<scope>): <说明>`）。
 - **核心计算必须在 NPU 上用 Ascend C 实现。** 赛区明确：把计算转移到 Host CPU、
   或用空 kernel 占位绕过 NPU 计算，均属违规，会取消当次提交成绩。
 - 每天最多提交 50 次，取比赛期间**最后一次**提交的成绩，务必做好版本管理。
