@@ -50,6 +50,7 @@ storage shape 而非要求真的转置，四种布局组合都要支持；归约
 ├── docs/                   # 赛题、赛区规则、官方范例参考
 ├── tools/                  # 辅助脚本
 ├── examples/               # 用法示例
+├── LESSONS.md              # 排错与避坑记录（已实际发生过的错误）
 └── pytest.ini
 ```
 
@@ -208,6 +209,8 @@ python3 -m judge.runner score --base <拆分实现基线耗时us> --time <当前
 
 ## 8. 注意事项
 
+- 动手前先读 [`LESSONS.md`](LESSONS.md)：里面是**已实际发生过**的错误与对应的
+  检查项，包括"用截断把异常伪装成正常值"、"测试通过但什么都没测"这类静默失效。
 - 提交信息遵循 [`CONTRIBUTING.md`](CONTRIBUTING.md) 约定的
   Conventional Commits 格式（`<type>(<scope>): <说明>`）。
 - **核心计算必须在 NPU 上用 Ascend C 实现。** 赛区明确：把计算转移到 Host CPU、
