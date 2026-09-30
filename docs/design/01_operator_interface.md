@@ -7,8 +7,9 @@
 不得凭推测实现。
 
 依据文件：
-- `API_FINDINGS.md`（本仓库外的调研报告，含原文引用与行号）
-- CANN 8.2 Ascend C 算子开发指南（下文简称"指南"）
+- [`docs/research/api_findings.md`](../research/api_findings.md) —— API 调研报告，
+  含官方文档原文引用与行号；本文件每处"依据"均可在此查到出处。
+- CANN 8.2 Ascend C 算子开发指南（下文简称"指南"，即报告中的 `devguide82.txt`）
 
 ---
 
