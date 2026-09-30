@@ -105,6 +105,24 @@ print('cuda  ', torch.cuda.is_available())
 
 期望看到 torch 版本带 `+cpu` 后缀、`cuda False`。
 
+### 4.3 如果本机装有 ROS
+
+ROS 会把 Python 3.10 的包路径写进 `PYTHONPATH`，该变量会被 conda 环境继承，
+导致 pytest 去加载 ROS 的插件并在导入时失败（报 `No module named 'yaml'` 之类）。
+这与本仓库无关，只是环境变量串了。跑测试时摘掉 `PYTHONPATH` 即可：
+
+```bash
+env -u PYTHONPATH python -m pytest
+```
+
+若希望保留 `PYTHONPATH` 而只屏蔽第三方 pytest 插件，可改用：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest
+```
+
+本仓库的测试不依赖任何外部 pytest 插件，两种方式都等效。
+
 
 ---
 
