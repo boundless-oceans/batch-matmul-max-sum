@@ -100,28 +100,93 @@ def test_compare_tolerances_match_problem_statement():
 # --------------------------------------------------- 得分公式
 
 
-def test_case_score_full_marks_at_baseline():
-    """t == T 时得满分 100。"""
+def test_case_score_full_marks_when_t_equals_T():
+    """t == T 时分母为 1，得满分 100。"""
     assert ref.case_score(100.0, 100.0) == pytest.approx(100.0)
+    assert ref.case_score(1000.0, 1000.0) == pytest.approx(100.0)
 
 
-def test_case_score_decreases_as_time_grows():
-    base = 100.0
-    scores = [ref.case_score(t, base) for t in (100.0, 150.0, 225.0, 337.5)]
-    assert scores == sorted(scores, reverse=True)
-    assert all(0 < s <= 100.0 for s in scores)
+def test_case_score_documented_anchor_values():
+    """可手算的锚点，按赛题原文 100 / (1 + log_1.5(t/T))。
 
-
-def test_case_score_known_values():
-    """1.5 倍耗时应恰好得 50 分：100 / (1 + log_1.5(1.5)) = 100 / (1+1)。"""
+    t = 1.5T -> log_1.5(1.5) = 1        -> 100 / 2   = 50
+    t = 2.25T-> log_1.5(2.25) = 2       -> 100 / 3
+    t = 0.75T-> log_1.5(0.75) = -0.7095 -> 100 / 0.2905 ~ 344.2
+    """
     assert ref.case_score(150.0, 100.0) == pytest.approx(50.0)
-    # 2.25 倍 -> log_1.5(2.25) = 2 -> 100/3
     assert ref.case_score(225.0, 100.0) == pytest.approx(100.0 / 3.0)
 
+    expected = 100.0 / (1.0 + np.log(0.75) / np.log(1.5))
+    assert ref.case_score(75.0, 100.0) == pytest.approx(expected)
 
-def test_case_score_caps_when_faster_than_best():
-    """比 T 更快也按满分封顶，不能超过 100。"""
-    assert ref.case_score(10.0, 100.0) == pytest.approx(100.0)
+
+def test_case_score_behavior_under_spec_literal_formula():
+    """记录**原文公式的真实行为**，避免有人凭直觉改错。
+
+    实测（T = 1000）::
+
+        t      400     700     1000    1400
+        得分   0.0     831.0   100.0   54.6
+
+    两个反直觉之处，都是原文公式的固有性质而非本实现的缺陷：
+
+    1. 分母 1 + log_1.5(t/T) 在 t = T/1.5 处过零，该点左侧无意义（本实现返回 0），
+       右侧则**无上界** —— t 略大于 T/1.5 时得分可远超 100。
+    2. 在有意义的区间（t > T/1.5）内，得分**随 t 增大而单调下降**，
+       与"按加速比评分"的意图方向相反。
+
+    若哪天拿到线上真实分数、确认公式是另一版，本测试与
+    ``reference.case_score`` 的说明必须同步修改。
+    """
+    base = 1000.0
+
+    # 无意义区间（分母非正）返回 0
+    assert ref.case_score(400.0, base) == 0.0
+    assert ref.case_score(600.0, base) == 0.0
+
+    # 有意义区间内单调递减
+    scores = [ref.case_score(t, base) for t in (700.0, 1000.0, 1400.0, 3000.0)]
+    assert scores == sorted(scores, reverse=True), f"t 增大得分应单调下降: {scores}"
+
+    # 渐近点附近无上界：得分可远超 100
+    assert ref.case_score(700.0, base) > 100.0, "原文公式在渐近点附近应远超 100 分"
+
+
+def test_case_score_never_returns_negative():
+    """分母转负的区间返回 0，不得返回负数或非有限值。"""
+    base = 1000.0
+    for t in (1.0, 100.0, 400.0, 500.0, 666.0, 666.67, 700.0, 1000.0, 1e6):
+        score = ref.case_score(t, base)
+        assert score >= 0.0, f"t={t} 得到负分 {score}"
+        assert np.isfinite(score), f"t={t} 得到非有限值 {score}"
+
+
+def test_case_score_known_pathological_region():
+    """t < T/1.5 时原文公式无意义，本实现按 0 分处理。
+
+    这是**已知的公式矛盾**，不是实现缺陷；若哪天公式被确认为另一版，
+    本测试需要跟着改，改动时必须同步更新 reference.case_score 的说明。
+    """
+    base = 1000.0
+    # 分母恰好转负的临界点: log_1.5(t/T) = -1 -> t = T/1.5 = 666.67
+    assert ref.case_score(600.0, base) == 0.0     # 明显越界
+    assert ref.case_score(700.0, base) > 0.0      # 未越界
+
+
+def test_case_score_regression_no_input_clamping():
+    """回归测试：严禁用 max()/min() 截断输入。
+
+    本函数曾被写成 ``t = max(t, T)``，把 t=400, T=1000 这种"越界"输入
+    夹成 t=T，于是**负分被掩盖成满分 100**，问题完全不可见。
+    这种掩盖比报错危险得多 —— 该测试确保它不会复活。
+    """
+    base = 1000.0
+    # 截断实现会在这里返回 100.0；正确实现返回 0.0（落在无意义区间）
+    assert ref.case_score(400.0, base) != pytest.approx(100.0)
+    assert ref.case_score(400.0, base) == 0.0
+
+    # 未越界时也不得被截断: t > T 必须低于满分
+    assert ref.case_score(1400.0, base) < 100.0
 
 
 def test_case_score_rejects_non_positive():
@@ -131,6 +196,8 @@ def test_case_score_rejects_non_positive():
         ref.case_score(100.0, -1.0)
 
 
-def test_num_test_points_matches_problem_statement():
+def test_score_constants_match_problem_statement():
     assert ref.NUM_TEST_POINTS == 15
     assert ref.SCORE_BASE == 1.5
+
+

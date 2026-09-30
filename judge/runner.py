@@ -212,17 +212,31 @@ def cmd_compare_one(args: argparse.Namespace) -> int:
 
 
 def cmd_score(args: argparse.Namespace) -> int:
-    """按赛题公式把"相对基线的加速比"换算成得分，用于估算排名。"""
-    base = args.base
-    print(f"基线（拆分实现总耗时 T） = {base} us")
-    print(f"共 {ref.NUM_TEST_POINTS} 个测试点，单点得分 = 100 / (1 + log_1.5(t/T))\n")
-    print(f"{'加速比':<10} {'t (us)':<12} {'单点得分':<10}")
-    print("-" * 34)
-    for speedup in [0.5, 1.0, 1.2, 1.5, 2.0, 3.0, 5.0, 8.0]:
-        t = base / speedup
-        print(f"{speedup:<10.2f} {t:<12.2f} {ref.case_score(t, base):<10.2f}")
+    """把耗时换算成得分估算。
+
+    公式为赛题原文 ``100 / (1 + log_1.5(t/T))``，照原文实现。
+    **原文公式存在已记录的矛盾**（见 ``reference.case_score``）：
+    t < T/1.5 时分母转负、公式无意义，本实现返回 0 分。
+    真实排行榜用哪一版尚未确认，本命令仅供估算。
+    """
+    T = args.T
+    print(f"T（赛题公式中的最优性能参数） = {T} us")
+    print(f"共 {ref.NUM_TEST_POINTS} 个测试点")
+    print("单点得分 = 100 / (1 + log_1.5(t/T))    [赛题原文，见 case_score 说明]\n")
+    print(f"{'t (us)':<12} {'t/T':<10} {'单点得分':<12}")
+    print("-" * 36)
+    for ratio in [1.0 / 3, 0.5, 0.667, 1.0, 1.4, 2.0, 3.0, 5.0, 8.0]:
+        t = T * ratio
+        score = ref.case_score(t, T)
+        note = "  <- 分母非正，原文公式无意义" if score == 0.0 else ""
+        print(f"{t:<12.2f} {ratio:<10.3f} {score:<12.2f}{note}")
+
     if args.time is not None:
-        print(f"\n当前提交 t={args.time} us -> 加速比 {base / args.time:.3f}x, 单点得分 {ref.case_score(args.time, base):.2f}")
+        score = ref.case_score(args.time, T)
+        print(f"\n当前提交 t={args.time} us -> t/T={args.time / T:.3f}, 单点得分 {score:.2f}")
+        if score == 0.0:
+            print("  注意：t < T/1.5，落在原文公式分母非正的无意义区间，按 0 分计。")
+            print("        这不代表实现一定拿 0 分 —— 公式本身的矛盾尚未与官方确认。")
     return 0
 
 
@@ -256,9 +270,10 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--dtype", help="覆盖 dtypeKey")
     sp.set_defaults(func=cmd_compare_one)
 
-    sp = sub.add_parser("score", help="按赛题公式估算得分")
-    sp.add_argument("--base", type=float, required=True, help="拆分实现基线总耗时 T (us)")
-    sp.add_argument("--time", type=float, help="当前提交耗时 t (us)")
+    sp = sub.add_parser("score", help="按赛题公式估算得分（注意公式存在已记录的矛盾）")
+    sp.add_argument("--T", "--base", dest="T", type=float, required=True,
+                    help="赛题公式中的 T（us）。原文只说'最优性能'，未界定口径，见 case_score 说明")
+    sp.add_argument("--time", "-t", type=float, help="当前提交耗时 t (us)")
     sp.set_defaults(func=cmd_score)
 
     args = p.parse_args(argv)
