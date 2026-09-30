@@ -22,7 +22,7 @@ from typing import Any
 
 import numpy as np
 
-from .tiling import CoreWork, TilingPlan, ceil_div, num_m_tiles
+from .tiling import CoreWork, TilingPlan, plan_tiling
 
 
 @dataclass
@@ -68,6 +68,7 @@ def simulate_kernel(
     sim_dtype
         相似度的累加与归约精度。FP32 对应 Cube 的真实行为；
         传 FP64 可用来分离"切分逻辑错误"与"累加精度不足"两类问题。
+        注意最终 Sum(M) 始终按 FP32 累加（与 kernel 一致），见下方说明。
     stats
         传入 ``SimStats`` 实例可回填硬件行为统计。
     """
@@ -80,18 +81,16 @@ def simulate_kernel(
     B, M, K = a_logical.shape
     _, _, N = b_logical.shape
 
-    plan = TilingPlan(
-        B=B, M=M, N=N, K=K,
-        base_m=base_m, base_n=base_n,
-        num_cores=num_cores,
-        works=_build_works(B, M, num_cores),
-    )
+    # 复用 tiling 模块的行分配规则，保证"规划"与"模拟"用的是同一套切分
+    plan = plan_tiling(B=B, M=M, N=N, K=K, num_cores=num_cores,
+                       base_m=base_m, base_n=base_n)
 
     # 按模拟精度转一次，模拟 Cube 装载时的类型转换
     a = np.ascontiguousarray(a_logical, dtype=sim_dtype)
     b = np.ascontiguousarray(b_logical, dtype=sim_dtype)
 
-    y = np.zeros(B, dtype=np.float64)
+    # 与 kernel 一致：输出在 FP32 上按 batch 累加，且累加顺序与核的处理顺序相同
+    y = np.zeros(B, dtype=np.float32)
 
     for work in plan.works:
         core_tiles = 0
@@ -102,20 +101,25 @@ def simulate_kernel(
 
         for row_start, row_end in _iter_m_tiles(work, base_m):
             rows = np.arange(row_start, row_end)
+            batch_of_row = rows // M
+            n_rows = row_end - row_start
 
             # 每个 (b, m) 行维护一个"累积行最大值"。初值为 -inf:
             # 赛题 3.7 明确要求不得初始化为 0，否则全负相似度会错。
-            acc = np.full(row_end - row_start, -np.inf, dtype=sim_dtype)
+            acc = np.full(n_rows, -np.inf, dtype=sim_dtype)
 
             for n0 in range(0, N, base_n):
                 n1 = min(n0 + base_n, N)
 
                 # --- Cube: (rows, K) x (K, n0:n1) -> (rows, cols) ---
-                cols_a = (rows // M)
-                cols_m = (rows % M)
-                sim_tile = np.zeros((row_end - row_start, n1 - n0), dtype=sim_dtype)
-                for i, (bb, mm) in enumerate(zip(cols_a, cols_m)):
-                    sim_tile[i] = np.dot(a[bb, mm], b[bb, :, n0:n1])
+                # 同一 batch 的行在 row 空间中连续，故按 batch 分段批量做矩阵乘，
+                # 避免逐行调用 np.dot（大数据集下慢一个数量级）。
+                sim_tile = np.empty((n_rows, n1 - n0), dtype=sim_dtype)
+                for bb in np.unique(batch_of_row):
+                    sel = np.flatnonzero(batch_of_row == bb)
+                    m_idx = rows[sel] - bb * M
+                    sim_tile[sel] = a[bb][m_idx] @ b[bb][:, n0:n1]
+
                 core_tiles += 1
                 if stats is not None:
                     stats.matmul_tiles += 1
@@ -130,39 +134,21 @@ def simulate_kernel(
                 if stats is not None:
                     stats.merge_ops += 1
 
-            # --- Sum(M): 该核把分配到的行的最大值求和，按 batch 分流 ---
-            for i, (bb, _mm) in enumerate(zip(rows // M, rows % M)):
-                y[bb] += float(acc[i])
+            # --- Sum(M): 该核把分配到的行的最大值按 batch 累加 ---
+            # 用 float32 累加，与 kernel 侧在 UB/GM 上的累加精度一致。
+            # 此处若转 float64，M 较大时会与 kernel 产生 1e-7 量级的相对差异，
+            # 虽远小于容差，但会给"模拟器 vs kernel"的对拍引入无谓变量。
+            for bb in np.unique(batch_of_row):
+                sel = np.flatnonzero(batch_of_row == bb)
+                y[bb] += np.sum(acc[sel], dtype=np.float32)
 
             if stats is not None:
-                stats.rows_processed += row_end - row_start
+                stats.rows_processed += n_rows
 
         if stats is not None:
             stats.per_core_tiles.append(core_tiles)
 
-    return y.astype(np.float32)
-
-
-def _build_works(B: int, M: int, num_cores: int) -> tuple[CoreWork, ...]:
-    """与 tiling.plan_tiling 相同的行分配逻辑。
-
-    这里复用同一套规则，但以 CoreWork 元组返回，避免 plan_tiling 里
-    对 base_m/base_n 的校验干扰纯逻辑推演。
-    """
-    total_rows = B * M
-    works: list[CoreWork] = []
-    cursor = 0
-    for core_id in range(num_cores):
-        remaining_cores = num_cores - core_id
-        remaining_rows = total_rows - cursor
-        if remaining_rows <= 0:
-            works.append(CoreWork(core_id=core_id, row_start=cursor, row_end=cursor))
-            continue
-        take = min(ceil_div(remaining_rows, remaining_cores), remaining_rows)
-        works.append(CoreWork(core_id=core_id, row_start=cursor, row_end=cursor + take))
-        cursor += take
-    assert cursor == total_rows
-    return tuple(works)
+    return y
 
 
 def _iter_m_tiles(work: CoreWork, base_m: int):
