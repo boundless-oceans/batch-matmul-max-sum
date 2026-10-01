@@ -123,6 +123,9 @@ docs: 补充 ROS 环境变量导致 pytest 加载失败的说明
   这样 Matmul 会实例化为 `MatmulImpl` 而可直接用于 `__cube__` 核。
   否则得到 `MatmulClient`（需 `__mix__` 协同），而仿真下 `__mix__` 的 AIC
   分支不执行，无法验证。详见 [`LESSONS.md`](LESSONS.md) 十一。
+- **本地编译必须限制并发核数**：`make -j8` 为上限（本机 24 核），不要用
+  `-j$(nproc)` 或高并发。曾因编译占满 CPU 导致开发机卡死。建议再加 `nice`
+  降低优先级。
 - **必须用平台会用的每一种 dtype 验证**。fp16 与 bf16 在 C++ 层面都是
   `uint16_t`，极易被当成同一种东西，但位布局完全不同（1+5+10 vs 1+8+7）。
   见 [`LESSONS.md`](LESSONS.md) 十：19/20 用例是 fp16，bf16 全错却没被发现。
