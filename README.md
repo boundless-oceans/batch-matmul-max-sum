@@ -39,25 +39,41 @@ storage shape 而非要求真的转置，四种布局组合都要支持；归约
 
 ```
 .
-├── src/                    # 算子本体（提交到 CANNLab 的部分）
-│   ├── op_host/            # 算子定义、InferShape/InferDataType、Tiling 计算
-│   └── op_kernel/          # Ascend C kernel 实现与 TilingData 结构
+├── submit/                 # 提交包：镜像平台上要提交的文件
+│   ├── kernel.asc          #   ← 唯一需要改动的文件（run_kernel + device kernel）
+│   └── README.md           #   目录用途、两条硬约束、工作流
 ├── judge/                  # 本地裁判（纯 CPU，不参与提交）
 │   ├── reference.py        # FP64 golden、约束校验、精度判定、得分公式
 │   ├── cases.py            # 20 个定向测试用例
 │   ├── runner.py           # CLI 入口
 │   └── tests/              # pytest 测试
+├── simulator/              # kernel 算法逻辑的 numpy 模拟器
 ├── docs/                   # 赛题、赛区规则、官方范例参考
-│   ├── platform/           # 竞赛平台机制与提交模板（直调模式）
-│   ├── design/             # 算子设计文档（接口契约、tiling、流水等）
+│   ├── platform/           # 竞赛平台机制与官方模板归档（直调模式）
+│   ├── design/             # 设计文档（接口契约、tiling、布局、流水）
 │   └── research/           # API 调研报告，设计文档的证据来源
-├── tools/                  # 辅助脚本
-├── examples/               # 用法示例
+├── tools/                  # 辅助脚本（含登记册一致性校验器）
 ├── LESSONS.md              # 排错与避坑记录（已实际发生过的错误）
 └── pytest.ini
 ```
 
-设计原则：`src/` 是待提交的算子，`judge/` 是裁判。**两者刻意不共享任何代码**——
+### 3.1 为什么提交包只有 `kernel.asc`
+
+本题是 **Ascend C 直调模式**：平台提供的工程里 `main.asc` 通过
+`#include "kernel.asc"` 引入算子实现，而 `CMakeLists.txt` 只编译 `main.asc`
+这一个编译单元。故：
+
+- **`kernel.asc` 是唯一需要改动的文件**。其余工程文件（`main.asc`、
+  `data_utils.h`、`CMakeLists.txt`、`run.sh`、`scripts/`）由平台或脚手架提供
+- 平台上虽能新建文件，但**新建的 `.asc` 不会被编译**（除非同时改
+  `CMakeLists.txt` 把它加进编译单元），故扩展代码只能写进被 `#include` 的
+  `.h` 文件。本项目选择不拆分，全部放在 `kernel.asc` 内，避免构建风险
+- 评测时会用平台自己的 `main.asc` 与输入数据替换本地的，故**不得依赖对
+  `main.asc` 的任何修改**，也不得改动 `run_kernel` 的签名
+
+工作流：在 `submit/kernel.asc` 内开发 → 提交前拷到官方模板目录 → 在平台提交。
+
+设计原则：`submit/` 是待提交的实现，`judge/` 是裁判。**两者刻意不共享任何代码**——
 裁判必须独立于被测对象，否则实现错了裁判会跟着一起错。
 
 ---
@@ -199,14 +215,23 @@ python3 -m judge.runner score --base <拆分实现基线耗时us> --time <当前
 
 ---
 
-## 7. 提交到 CANNLab 的流程
+## 7. 开发与提交流程
 
-1. 在 `src/` 下完成算子实现
-2. 本地先跑 `python3 -m judge.runner verify` 与 `python3 -m pytest`，确保裁判自身可信
-3. 把 `src/` 下的算子工程上传到赛区 CANNLab 编译
-4. 用 `generate` 导出的用例在服务器上跑算子，把输出取回
-5. 本地 `compare` 对拍，定位是精度问题、尾块问题还是归约顺序问题
+本题为 **Ascend C 直调模式**，且**平台不能自助跑测试、只能靠正式提交看结果**
+（每天上限 50 次）。故流程围绕"一次写对"设计，而非在服务器上试错：
+
+1. 在 `submit/kernel.asc` 内开发。本机无 CANN，**编译不了**，故写之前先把用到的
+   每个 API 查证清楚（依据见 `docs/research/api_findings.md`）
+2. 本地验证算法逻辑：`python3 -m judge.runner verify` 与 `python3 -m pytest`
+   —— 裁判（`judge/`）与模拟器（`simulator/`）共 191 项测试
+3. 提交前**跑一遍 API 预检清单**（对照 `docs/design/` 里标注的依据逐项核对），
+   把编译期问题尽量在本机暴露
+4. 把 `submit/kernel.asc` 拷到官方模板目录，在平台提交
+5. 用 `generate` 导出的用例与平台输出对拍（`compare`），定位问题
 6. 按 `score` 估算得分，迭代优化
+
+**首次提交应是最小可编译版本**（`run_kernel` 只启动一个空 kernel），用于一次性
+暴露平台侧的未知项（`OQ-009`/`012`/`013`）——不要把它们与算法错误混在一次提交里。
 
 ---
 

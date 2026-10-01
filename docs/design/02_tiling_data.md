@@ -79,7 +79,7 @@ block 数——它与官方直调示例中 `PlatformAscendCManager` 的 `GetCore
 ### 3.1 结构定义
 
 ```cpp
-// 定义在 kernel.asc 内（直调模式下只有这一个源文件，不需要单独的头文件，
+// 定义在 submit/kernel.asc 内（直调模式下只有这一个源文件，不需要单独的头文件，
 // 故也不需要 include guard —— kernel.asc 是被 main.asc #include 的）
 struct BatchMatmulMaxSumTiling {
     int32_t B;
