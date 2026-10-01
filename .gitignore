@@ -36,3 +36,6 @@ CMakeCache.txt
 # CANN 工具链（本机仿真用，十几 G，绝不入库）
 /Ascend/
 /build_sim/
+
+# 本地仿真构建产物
+local_build/build_*/

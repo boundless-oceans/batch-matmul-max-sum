@@ -41,10 +41,52 @@ ASC_INCLUDES = (
 )
 
 # 非标准 C++ 的 Ascend 语法 -> 桩写法
+# 捕获组不得跨括号或换行 —— 否则会从注释里的 "<<<>>>" 字样一直吞到真正的
+# 启动调用（实测踩过：注释里提到 <<<>>> 后，改写把大段代码吃掉了）。
 LAUNCH_RE = re.compile(
-    r"(?P<kernel>\w+)\s*<<<\s*(?P<a>[^,]+),\s*(?P<b>[^,]+),\s*(?P<c>[^>]+?)\s*>>>\s*\(",
-    re.S,
+    r"(?P<kernel>\w+)\s*<<<\s*(?P<a>[^,()\n]+),\s*(?P<b>[^,()\n]+),"
+    r"\s*(?P<c>[^>(),\n]+?)\s*>>>\s*\(",
 )
+
+
+def _strip_comments_for_rewrite(source: str) -> str:
+    """去掉注释与字符串里的干扰，但**保留行号与代码结构**。
+
+    只需保证 `<<<>>>` 的匹配不会落到注释里，故把注释替换成空格、字符串整体
+    替换成等长的占位（避免其中的 `<<<` 被匹配）。
+    """
+    out: list[str] = []
+    i, n = 0, len(source)
+    state = "code"
+    while i < n:
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if state == "code":
+            if ch == "/" and nxt == "/":
+                state = "line"; out.append("  "); i += 2; continue
+            if ch == "/" and nxt == "*":
+                state = "block"; out.append("  "); i += 2; continue
+            if ch == '"':
+                state = "str"
+            elif ch == "'":
+                state = "char"
+            out.append(ch); i += 1; continue
+        if state == "line":
+            out.append("\n" if ch == "\n" else " ")
+            if ch == "\n":
+                state = "code"
+            i += 1; continue
+        if state == "block":
+            if ch == "*" and nxt == "/":
+                state = "code"; out.append("  "); i += 2; continue
+            out.append("\n" if ch == "\n" else " "); i += 1; continue
+        # str / char：整体保留但把可能干扰匹配的字符换成空格
+        if ch == "\\" and i + 1 < n:
+            out.append("  "); i += 2; continue
+        if (state == "str" and ch == '"') or (state == "char" and ch == "'"):
+            state = "code"
+        out.append(" " if ch in "<>" else ch); i += 1
+    return "".join(out)
 
 
 def rewrite_for_stub(source: str) -> str:
@@ -52,7 +94,9 @@ def rewrite_for_stub(source: str) -> str:
 
     只在内存中的副本上做，**不改动 `submit/kernel.asc`**。
     """
-    out = source
+    # 先剥注释再改写：注释里出现的 `<<<>>>` 字样不应参与匹配。
+    # 用与 check_submit_compliance 同思路的简化剥离（此处只需去掉注释文本）。
+    out = _strip_comments_for_rewrite(source)
     for inc in ASC_INCLUDES:
         out = out.replace(f'#include "{inc}"', f"// [stub] {inc}")
 
