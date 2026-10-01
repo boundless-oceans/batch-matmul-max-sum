@@ -40,7 +40,7 @@
 
 ## 2. 未决事项
 
-本节共 **17 项**：下表 15 项各有归属文档（含平台侧 3 项），2.1 节 2 项属于
+本节共 **20 项**：下表 18 项各有归属文档（含平台侧 2 项），2.1 节 2 项属于
 "验证手段是否成立"，无独立归属文档。共 25 项。
 
 | 编号 | 归属 | 事项 | 处置方式 | 预计消除于 |
@@ -58,8 +58,11 @@
 | `OQ-007` | `04` §3.1 | 不传 `sharedTmpBuffer` 的 `ReduceMax` 重载，框架自动申请的临时空间是否足够 | 若不足则改用手动版本并调用 `GetReduceMaxMaxMinTmpSize` | 阶段 4 / 6 |
 | `OQ-009` | `platform` §7 | 模板注释用 `__global__ __cube__`，而 devkit 直调示例全用 `__global__ __vector__` | 优先按模板给的 `__cube__` 写；编译报错则改 `__vector__` | 阶段 6 |
 | `OQ-012` | `platform` §7 | 平台是否为 15 个用例各自独立编译 | 影响 dtype 分派策略与编译耗时；由首次提交的耗时推断 | 阶段 6 |
-| `OQ-013` | `platform` §3.3 | `run_kernel` 所在的 `kernel.asc` 由带 `--npu-arch` 的 Ascend 编译器处理，host 侧的 `platform_ascendc` 与 `MultiCoreMatmulTiling` 能否在同一编译单元内正常使用，无 Matmul 直调实例可佐证 | 首次提交时验证；不可行则在 host 侧自行推导 tiling 参数而不依赖 tiling API | 阶段 6 |
+| `OQ-013` | `02` §5.1 | `run_kernel` 所在的 `kernel.asc` 由带 `--npu-arch` 的 Ascend 编译器处理，host 侧的 `platform_ascendc` 与 `MultiCoreMatmulTiling` 能否在同一编译单元内正常使用，无 Matmul 直调实例可佐证。**优先级最高**——它决定 tiling 参数是算出来的还是推导出来的 | 首次提交时验证；不可行则自行推导 `TCubeTiling` 各字段 | 阶段 6 |
 | `OQ-014` | `01` §4 | `run_kernel` 内的错误上报方式（无 `OP_LOGE` 类框架接口） | 候选 `AscendC::printf` 或 host 侧 `std::cout`；不影响正确性，影响排障效率 | 阶段 4 |
+| `OQ-015` | `02` §3.1 | `TCubeTiling` 的定义来自哪个头文件 | 原按算子工程写 `"kernel_tiling/kernel_tiling.h"`；`kernel_operator.h` 是否传递性提供未确认。编译报未定义则补 include | 阶段 6 |
+| `OQ-016` | `02` §3.2 | 结构体按值传给 kernel 是否显著增加 launch 开销 | 结构体含 `TCubeTiling`，约 200 字节。不预先优化，阶段 7 用 `msprof` 测后再定 | 阶段 7 |
+| `OQ-017` | `02` §5.3 | Matmul 是否需要 workspace，直调模式下如何提供 | 当前假设不需要（目标路径 Cube 直写 UB）。若回退到 GM 路径则必然需要，届时必须解决 | 阶段 6 |
 
 ### 2.1 两条与验证方法本身有关的未决项
 
