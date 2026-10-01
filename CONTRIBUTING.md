@@ -108,6 +108,9 @@ docs: 补充 ROS 环境变量导致 pytest 加载失败的说明
 - **平台相关的写法，必须从可运行的官方示例抄**，不能从注释/文档/记忆推断。
   见 [`LESSONS.md`](LESSONS.md) 七：模板注释建议 `__cube__`，而本算子实际需要
   `__mix__`，这类错误本地任何检查都抓不到。
+- **设备侧代码调用的函数必须标 `__aicore__`**。Ascend C 编译器区分宿主/设备侧，
+  未标注的函数默认是宿主函数。见 [`LESSONS.md`](LESSONS.md) 九。
+  由 `tools/check_device_calls.py` 检查（语法检查抓不到这一类）。
 - **提交代码中不得留下任何调试输出**（`printf`、`ASSERT`、`DumpTensor` 等）。
   平台会判为"不合规内容"并拒绝提交。见 [`LESSONS.md`](LESSONS.md) 八。
   `tools/asc_stub/` **刻意不提供这些接口的桩**，误用会在本机语法检查时暴露。

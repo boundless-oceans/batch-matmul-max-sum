@@ -23,6 +23,16 @@ using aclrtStream = void*;
 struct TensorInfo { const int64_t* shape; int64_t numDims; int32_t dtype; };
 struct TensorGroupInfo { const TensorInfo* tensors; int64_t numTensors; };
 
+/*
+ * 说明：__global__ / __aicore__ 在这里只是空宏。
+ *
+ * 曾尝试用 GCC 的 `__attribute__((device))` / `((host))` 建模 host/device
+ * 区分，以复现"device 调用 host 函数"这类错误——**但 GCC 会直接忽略这两个
+ * 属性**（`warning: 'host' attribute directive ignored`），故该方案无效，已撤。
+ *
+ * 这类错误改由 `tools/check_device_calls.py` 用源码分析的方式检查
+ * （见该文件）。
+ */
 #define __global__
 #define __aicore__
 #define __gm__

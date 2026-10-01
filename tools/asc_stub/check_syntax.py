@@ -84,6 +84,7 @@ def rewrite_for_stub(source: str) -> str:
             + ")"
         )
         out = out[:m.start()] + replacement + out[close_paren + 1:]
+
     return out
 
 

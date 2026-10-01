@@ -343,3 +343,64 @@ git checkout -B <feature-branch> main
 `printf` 被禁后，可用的信息取回通道就只剩输出张量本身。本项目的做法是把
 多个探测值**按位置编码**进一个 float（`code = B*16^5 + blockNum*16^4 + ...`），
 选 16 为基数使码值 < 2^24，可被 float32 精确表示、无进位误差。
+
+---
+
+## 九、语法检查通过了，但真实编译器拒绝：宿主/设备函数的区分
+
+### 发生了什么
+
+平台报错（纯向量版本）：
+
+```
+error: no matching function for call to 'X1Index'
+note: candidate function not viable: call to [host] function from
+      __global__ [aicore] function
+```
+
+即：`__global__` kernel 里调用了两个未标 `__aicore__` 的辅助函数
+（`X1Index` / `X2Index`）。Ascend C 编译器**区分宿主侧与设备侧函数**，
+未标注的函数默认是宿主函数，设备代码不能调用。
+
+**而 `tools/asc_stub/` 的语法检查报了"通过"。**
+
+### 为什么语法检查抓不到
+
+桩把 `__global__` / `__aicore__` 定义成空宏，根本没有 host/device 的概念。
+
+**尝试过用 GCC 属性建模，但失败了**：
+
+```cpp
+__attribute__((host))  int hostFn(int x);
+__attribute__((device)) int devFn(int x) { return hostFn(x); }   // 期望报错
+```
+
+GCC 给出 `warning: 'host' attribute directive ignored` —— **属性被直接忽略，
+不产生任何诊断**。那两个属性是 CUDA 的，GCC 不实现。该方案已撤销。
+
+### 最终解法：源码分析
+
+新增 `tools/check_device_calls.py`：找出设备侧函数（`__global__` / `__aicore__`
+标注的）体内的调用，凡是调到**本文件内定义了但没有设备标记**的函数就报错。
+它精确复现了平台的报错位置（第 163、164 行）。
+
+### 这个检查器自己也踩了一个坑
+
+**属性白名单必然漏。** 第一版只把 `__global__` / `__aicore__` 列进属性白名单，
+而实际写法是 `__global__ __vector__` —— `__vector__` 不在名单里，于是设备函数
+被判定为 **0 个**，检查**静默失效**（报告"全部通过"却什么都没查）。
+
+改为反向做法：取"行首到函数名"之间的全部内容作属性，再看其中是否含设备标记。
+并加了参数化测试，覆盖 `__vector__` / `__cube__` / `__aicore__` /
+`__mix__(1, 2)` / 无属性等写法。
+
+### 教训
+
+**"检查通过"不等于"检查有效"。** 一个静默失效的检查器比没有检查更危险——
+它给人虚假的安全感。故本项目的每个检查器都要求：
+
+1. 有**故障注入测试**（注入错误后必须失败）
+2. 有**覆盖各种写法的参数化测试**（防止白名单式漏判）
+3. 报告时**输出它实际检查了多少东西**（如"设备函数 3 个"），
+   数量为 0 或异常时一眼可见
+
