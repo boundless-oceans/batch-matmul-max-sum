@@ -90,9 +90,11 @@ def test_rewrite_strips_ascend_includes():
         ("API 名拼错",
          "AscendC::GetBlockNum()",
          "AscendC::GetBlockNumX()"),
+        # 锚点刻意选取与具体实参无关的片段：早先用 "..., 2);" 作锚点，
+        # 后来该实参由字面量 2 改为 dtypeCode，测试随之失效（实测踩过）。
         ("launch 参数个数不对",
-         "transposeX1 ? 1 : 0, transposeX2 ? 1 : 0, 2);",
-         "transposeX1 ? 1 : 0);"),
+         "x1, x2, y, d.B, d.M, d.N, d.K,",
+         "x1, x2, y,"),
     ],
 )
 def test_checker_has_teeth(name, old, new, tmp_path):

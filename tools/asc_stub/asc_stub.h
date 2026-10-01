@@ -48,6 +48,7 @@ enum class TPosition { GM, VECIN, VECOUT, VECCALC };
 template <typename T> struct GlobalTensor {
     void SetGlobalBuffer(__gm__ T*, uint32_t) {}
     T GetValue(uint32_t) const { return T{}; }
+    __gm__ T* GetPhyAddr() const { return nullptr; }
     // 注意：真实头文件里 GlobalTensor::SetValue 的**声明与实现签名不一致**
     // （头文件 uint32_t index + 模板参数 S，impl uint64_t offset + PrimType）。
     // 桩按头文件形态建模；设备侧标量写 GM 有编译风险，见 API 台账。
