@@ -42,3 +42,9 @@ local_build/build_*/
 
 # 本地构建产物（任意层级的 build 目录）
 local_build/**/b/
+
+# 临时对比文件
+.a.asc
+.platform_ok.asc
+.kernel_platform_ok.asc
+.kb.asc
