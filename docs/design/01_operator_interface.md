@@ -1,363 +1,247 @@
 # 01 · 算子接口契约
 
-本文件定义 `BatchMatmulMaxSum` 算子的对外接口：原型声明、输入输出、属性、
-形状推导与类型推导规则。**阶段 3（`op_host`）必须逐条对应本文件。**
+本文件定义 `BatchMatmulMaxSum` 在**直调（Direct Invocation）模式**下的对外接口：
+唯一的契约入口 `run_kernel`、张量描述结构的读取规则、以及从存储形状反推逻辑
+维度的规则。
 
-所有 API 用法均标明依据来源。凡"未找到确切依据"的条目集中列在第 7 节，
-不得凭推测实现。
+> **本文件已于阶段 2 重写。** 早期版本按"自定义算子工程"编写，含 `OpDef` 算子
+> 原型、`InferShape`/`InferDataType`、属性声明与 TilingKey 分派。经平台模板确认
+> 本题为**直调模式**，上述内容**整体作废**：平台负责算子原型与形状/类型推导，
+> 开发者只需实现 `run_kernel` 与 device kernel。
+> 依据见 [`../platform/00_platform_mechanics.md`](../platform/00_platform_mechanics.md)。
 
-依据文件：
-- [`docs/research/api_findings.md`](../research/api_findings.md) —— API 调研报告，
-  含官方文档原文引用与行号；本文件每处"依据"均可在此查到出处。
-- CANN 8.2 Ascend C 算子开发指南（下文简称"指南"，即报告中的 `devguide82.txt`）
-
----
-
-## 1. 算子基本信息
-
-| 项 | 取值 | 说明 |
-| :--- | :--- | :--- |
-| 算子名 | `BatchMatmulMaxSum` | 注册名需与 `REGISTER_TILING_DATA_CLASS` 的第一个参数一致 |
-| 输入个数 | 2 | `x1`、`x2`，均 REQUIRED |
-| 输出个数 | 1 | `y`，REQUIRED |
-| 属性个数 | 2 | `transposeX1`、`transposeX2`，均 OPTIONAL 且带默认值 |
-| 支持的 SoC | `ascend910b`、`ascend910_93` | 依据：指南 `add_custom_tiling_sink.cpp` 的 A2/A3 双平台写法 |
-
-SoC 字符串的填写规则：指南原文"请参考算子工程目录下编译配置项文件
-`CMakePresets.json` 中的 `ASCEND_COMPUTE_UNIT` 字段"。**阶段 5 写构建文件时
-需核对赛区 CANNLab 实际使用的值**，若为其它型号需追加 `AddConfig`。
-多次 `AddConfig` 是并列注册（逻辑或），不是覆盖。
+所有 API 用法均标明依据来源。无确切依据的条目标为待确认项，登记于
+[`00_open_questions.md`](00_open_questions.md)，不得凭推测实现。
 
 ---
 
-## 2. 输入输出定义
+## 1. 唯一契约入口：`run_kernel`
 
-| 类型 | 名称 | 逻辑 shape | 存储 dtype | 数据格式 |
-| :--- | :--- | :--- | :--- | :--- |
-| INPUT | `x1` | `(B, M, K)` | FLOAT16 / BFLOAT16 | ND |
-| INPUT | `x2` | `(B, K, N)` | FLOAT16 / BFLOAT16 | ND |
-| OUTPUT | `y` | `(B,)` | FLOAT32 | ND |
-
-**storage shape 由属性决定，不是固定的**：
-
-| 属性组合 | `x1` 的 storage shape | `x2` 的 storage shape |
-| :--- | :--- | :--- |
-| 默认（两者均 false） | `(B, M, K)` | `(B, K, N)` |
-| `transposeX1=true` | `(B, K, M)` | 同左列规则 |
-| `transposeX2=true` | 同上 | `(B, N, K)` |
-
-> `transposeX1/X2` **只声明输入的存储布局，不表示算子需要额外执行转置操作**
-> （赛题 3.5、四.4）。四种组合都必须给出正确结果。
-
-### 2.1 声明写法
-
-参照指南 `matmul_abs_host.cpp` 与 `AddCustom` 示例：
+平台模板 `docs/platform/template/kernel.asc:20-22` 已给定签名，
+**必须原样保留，不得改动**——评测时平台会用自带的 `main.asc` 调用它。
 
 ```cpp
-this->Input("x1")
-    .ParamType(REQUIRED)
-    .DataType({ge::DT_FLOAT16, ge::DT_BF16})
-    .Format({ge::FORMAT_ND})
-    .UnknownShapeFormat({ge::FORMAT_ND});
-this->Input("x2")   // 同上
-this->Output("y")
-    .ParamType(REQUIRED)
-    .DataType({ge::DT_FLOAT32})
-    .Format({ge::FORMAT_ND})
-    .UnknownShapeFormat({ge::FORMAT_ND});
+extern "C" void run_kernel(GM_ADDR x1, const TensorGroupInfo& info_x1,
+                           GM_ADDR x2, const TensorGroupInfo& info_x2,
+                           GM_ADDR y,  const TensorGroupInfo& info_y,
+                           int64_t availableCoreNum, aclrtStream stream,
+                           bool transposeX1, bool transposeX2)
 ```
 
-**待确认 A**：`DataType({...})` 传入两个 dtype 时，是声明"支持这两种"还是
-"对应两种 dtype 组合的列表"。参照指南中 `ReduceMax` 等多 dtype 算子的写法，
-两种理解在 CANN 中都有出现。**阶段 3 需按实际编译结果确认**；
-若报 dtype 数量不匹配，改为逐 dtype 注册或用 `OpAICoreConfig` 差异化配置。
+| 参数 | 含义 |
+| :--- | :--- |
+| `x1`、`x2` | device 侧输入数据指针（`GM_ADDR`，即 `__gm__ uint8_t*`） |
+| `info_x1`、`info_x2`、`info_y` | 各张量的描述（形状与 dtype），见 §2 |
+| `y` | device 侧输出数据指针，形状 `(B,)` |
+| `availableCoreNum` | 可用核数，由宿主经 `aclrtGetDeviceInfo(ACL_DEV_ATTR_CUBE_CORE_NUM)` 取得 |
+| `stream` | `aclrtStream`，用于启动 device kernel |
+| `transposeX1`、`transposeX2` | **普通 `bool` 参数**，非算子属性 |
+
+**`run_kernel` 在 host 侧执行**——依据 `template/main.asc:78`，宿主程序传入
+`availableCoreNum` 与 `stream`。故 host 侧的 tiling 计算就写在这个函数里。
+
+### 1.1 由此取消的内容
+
+直调模式下**不存在**下列机制，本文件不再涉及：
+
+| 已取消 | 原因 |
+| :--- | :--- |
+| `OpDef` 算子原型、`Input`/`Output`/`Attr` 声明 | 平台负责算子原型 |
+| `InferShape`、`InferDataType` | 平台负责形状与类型推导 |
+| 算子属性 `transposeX1/X2` 及其 `GetAttrPointer` 读取 | 改为普通函数参数 |
+| `TilingKey`、`SetTilingKey`、`TILING_KEY_IS` | 属算子工程框架，直调无此机制 |
+| `GET_TILING_DATA`、`REGISTER_TILING_DATA_CLASS` | 改为结构体按值传参，见 `02` |
 
 ---
 
-## 3. 属性定义
+## 2. 张量描述结构
 
-| 名称 | 数据类型 | AttrType | 默认值 | 含义 |
-| :--- | :--- | :--- | :--- | :--- |
-| `transposeX1` | Bool | OPTIONAL | `false` | 声明 `x1` 的 storage shape 为 `(B,K,M)` |
-| `transposeX2` | Bool | OPTIONAL | `false` | 声明 `x2` 的 storage shape 为 `(B,N,K)` |
-
-### 3.1 声明写法
-
-指南 6.x 的 `ReduceMax` 属性示例给出了确切形式：
+定义于 `template/main.asc:15-23`（受 `TENSOR_GROUP_INFO_DEFINED` 宏保护）：
 
 ```cpp
-this->Attr("transposeX1").AttrType(OPTIONAL).Bool(false);
-this->Attr("transposeX2").AttrType(OPTIONAL).Bool(false);
+struct TensorInfo {
+    const int64_t* shape;
+    int64_t numDims;
+    int32_t dtype;
+};
+struct TensorGroupInfo {
+    const TensorInfo* tensors;
+    int64_t numTensors;
+};
 ```
 
-依据：指南"原型定义中还包括算子属性信息"一节，原文示例为
+**读取方式**：`info_x1.tensors[0].shape[0]` 即"输入 x1 的第一个张量的第 0 维"
+（`template/kernel.asc:11` 的用法说明即为此）。
 
-```cpp
-this->Attr("reduceDim").AttrType(REQUIRED).Int();
-this->Attr("isKeepDim").AttrType(OPTIONAL).Int(1);
-```
+### 2.1 dtype 编码
 
-`OpAttrDef` 的可用类型设置接口：`Bool/Float/Int/String/ListBool/...`，
-均支持带默认值重载。指南明文：**"属性类型设置为 OPTIONAL 时必须调用该类接口
-设置默认值"** —— 故上面必须写 `Bool(false)` 而非 `Bool()`。
+`template/main.asc:12-14` 给出了完整编码：
 
-另有约束："`Attr` 属性名不能与 python 关键字及内置变量名相同，否则会导致
-未定义错误。" `transposeX1`、`transposeX2` 均不冲突。
+| 值 | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+| :--- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| 类型 | fp32 | fp16 | bf16 | int8 | int16 | int32 | int64 | uint8 | uint16 | uint32 | uint64 | bool |
 
-### 3.2 读取写法（tiling 侧）
+**本题只涉及 `1`（fp16）与 `2`（bf16）**——赛题 3.3 规定 `x1`/`x2` 仅支持
+FLOAT16、BFLOAT16，输出恒为 fp32。
 
-指南 `ReduceMax` 示例的确切形式：
+### 2.2 关于 `numTensors`
 
-```cpp
-const gert::RuntimeAttrs* attrs = context->GetAttrs();
-const bool* t1 = attrs->GetAttrPointer<bool>(0);   // transposeX1 是第 0 个属性
-const bool* t2 = attrs->GetAttrPointer<bool>(1);   // transposeX2 是第 1 个属性
-```
+结构上支持一组多个张量，但本题每个输入/输出**只有一个**张量
+（依据：`template/main.asc:49-56`，`numTensors` 均为 1）。
 
-索引按**原型定义中的顺序**，从 0 开始。
-
-**待确认 B**：`GetAttrPointer<bool>` 的模板参数。指南中整数属性用
-`GetAttrPointer<uint32_t>`（ReduceMax 示例）与 `GetAttrPointer<int64_t>`
-（格式转换示例）两种写法都有，Bool 属性无示例。**阶段 3 若编译报错，
-依次尝试 `bool` / `int64_t` / `uint32_t`**。因属性恒有默认值（OPTIONAL），
-返回指针不应为 nullptr，但实现时仍应判空。
+实现时**仍应校验 `numTensors == 1`**，避免平台传入多张量时静默取错。
 
 ---
 
-### 3.3 多 dtype 支持方式（DTYPE 宏）
+## 3. 从存储形状反推逻辑维度
 
-一个 `__global__` 入口要同时支持 FP16 与 BF16 输入。CANN 的做法是用
-`DTYPE_<Arg>` 宏表示"框架按实际实例化类型填入的类型名"，**宏可直接作为
-`MatmulType` 的模板参数**：
-
-```cpp
-extern "C" __global__ __aicore__ void batch_matmul_max_sum(
-    GM_ADDR x1, GM_ADDR x2, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
-{
-    using aType = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND, DTYPE_X1, ISTRANS_X1>;
-    using bType = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND, DTYPE_X2, ISTRANS_X2>;
-    // ...
-}
-```
-
-依据：指南"核函数内推导输入数据类型和格式"一节，原文明确
-"算子工程在核函数内提供了 `DTYPE_<Arg>`、`ORIG_DTYPE_<Arg>`、`FORMAT_<Arg>`
-三种宏用于推导核函数入参的数据类型、原始数据类型和数据格式"，并给出了
-`MatmulType<..., DTYPE_X1>` 的实际用例。
-
-`<Arg>` 自动大写，与原型定义中的输入名对应（`x1` → `DTYPE_X1`）。
-
----
-
-### 3.4 四种布局的编译期分派：TilingKey
-
-这里存在一个**接口层面的矛盾**，必须在设计阶段解决：
-
-- 四种 transpose 组合是**运行时属性**（`transposeX1/X2` 来自算子属性）
-- 而 `MatmulType` 的 `ISTRANS` 是**编译期模板参数**
-
-所以"用同一个 kernel 代码处理四种布局"不可行 —— `ISTRANS` 必须是编译期常量。
-
-**解法**：用 TilingKey 让 host 侧在运行时选定编译期分支。
-
-依据：指南"TilingKey（可选）"一节，原文说明 TilingKey 是"用于选择不同的
-kernel 实现分支"的 tiling 输出，并给出确切用法：
-
-```cpp
-// host 侧：按属性选定 key（编码定义见 03_matmul_layouts.md 3.1，此处不重复）
-context->SetTilingKey(static_cast<uint64_t>(t1) * 2 + static_cast<uint64_t>(t2));
-
-// kernel 侧：常量折叠，每个 key 编译成独立入口
-if (TILING_KEY_IS(0)) {
-    Process<false, false>(...);
-} else if (TILING_KEY_IS(1)) {
-    Process<false, true>(...);
-} else if (TILING_KEY_IS(2)) {
-    Process<true, false>(...);
-} else if (TILING_KEY_IS(3)) {
-    Process<true, true>(...);
-}
-```
-
-**理由与代价**：
-
-- 指南原文说明该机制的用途是避免大函数分支造成的 icache miss ——
-  "每次 kernel 运行只会选择 1 个分支"，用 TilingKey 可让编译期完成常量折叠。
-  本题四个 `Process` 模板实例确实较大，正属该机制的适用场景。
-- **代价**：kernel 代码会按 TilingKey 数量展开成多份。指南提到可通过编译选项
-  `--tiling_keys` 只编译指定 key 以加速编译。本题 4 个 key，尚可接受。
-
-**待确认 H**：TilingData 是四个 key 共用一份结构，还是每个 key 各一份。
-官方示例中不同 key 对应不同 TilingData 类型的情况存在。
-
-**当前设计为共用一份**：转置标志已编码进 TilingKey，故四个 key 的 TilingData
-**字段集与取值完全相同**（转置信息不进 TilingData，见 `02_tiling_data.md` 2.2 节）。
-
----
-
-## 4. 维度推导规则
-
-### 4.1 从 storage shape 反推 B / M / N / K
-
-这是最易错的一步：**不能照抄输入 shape 的第几位**，因为 `transposeX1/X2`
-会改变维度的位置。规则如下：
+这是最易错的一步：**不能照抄 shape 的第几位**，因为 `transposeX1/X2`
+会改变维度的位置。
 
 | 量 | `transposeX1=false` | `transposeX1=true` |
 | :--- | :--- | :--- |
-| `B` | `x1_shape[0]` | `x1_shape[0]` |
-| `M` | `x1_shape[1]` | `x1_shape[2]` |
-| `K` | `x1_shape[2]` | `x1_shape[1]` |
+| `B` | `x1.shape[0]` | `x1.shape[0]` |
+| `M` | `x1.shape[1]` | `x1.shape[2]` |
+| `K` | `x1.shape[2]` | `x1.shape[1]` |
 
 | 量 | `transposeX2=false` | `transposeX2=true` |
 | :--- | :--- | :--- |
-| `B` | `x2_shape[0]` | `x2_shape[0]` |
-| `K` | `x2_shape[1]` | `x2_shape[2]` |
-| `N` | `x2_shape[2]` | `x2_shape[1]` |
+| `B` | `x2.shape[0]` | `x2.shape[0]` |
+| `K` | `x2.shape[1]` | `x2.shape[2]` |
+| `N` | `x2.shape[2]` | `x2.shape[1]` |
 
-`B` 恒为第 0 维，与两个属性均无关。`K` 由 `x1` 与 `x2` 各自推出后**必须相等**
-（赛题 3.4：不支持 batch broadcast，且 `x1`/`x2` 的 B 与 K 分别相等）。
+`B` 恒为第 0 维，与两个 transpose 参数均无关。`K` 由 `x1` 与 `x2` 各自推出后
+**必须相等**（赛题 3.4：不支持 batch broadcast，且 `x1`/`x2` 的 B 与 K 分别相等）。
 
-维度值通过 `gert::Shape::GetDim(size_t idx)` 读取，返回 `int64_t`。
-`M`、`N` 最大 8192，转 `int32_t` 安全。
+**输出维度**：`y` 的 shape 由平台按 `(B,)` 给定（`template/main.asc:54-55`），
+故 `run_kernel` 内**只需读取、不需推导**。
 
-### 4.2 形状推导（InferShape）
+> 上表已用本仓库 `simulator` 的四种布局用例反向验证过：构造已知
+> `(B,M,K)`/`(B,K,N)` 后按四种组合落成存储形状，再用本规则反推，结果全部正确。
+> 反向也验证了该表不可省——照抄"M=shape[1]"在 `transposeX1=true` 时会把
+> `M=5, K=32` 读成 `M=32, K=5`。
 
-输出 shape 恒为 `(B,)`，**不能沿用官方 `MatmulAbs` 范例的 `*y_shape = *x1_shape`**
-——那会得到 `(B,M,K)`。
+---
 
-指南给出的标准形式（以 `Reshape` 为例）。`gert::Shape` 的两个写入接口签名
-已从指南 API 参考确认：
+## 4. 输入约束与校验
+
+赛题 3.4 给出的约束，以及本设计是否在 `run_kernel` 内校验：
+
+| 约束 | 是否校验 | 理由 |
+| :--- | :--- | :--- |
+| `x1`、`x2` 的 `numDims == 3` | ✅ | 维数不对时按 §3 取 shape 会越界 |
+| `numTensors == 1`（三个张量组） | ✅ | 见 §2.2 |
+| `B` 相等且 `1 ≤ B ≤ 64` | ✅ | 不等时无法一一配对 |
+| `K` 相等且 `32 ≤ K ≤ 8192`、`K % 8 == 0` | ✅ | Cube 对 K 有对齐要求 |
+| `1 ≤ M, N ≤ 8192` | ✅ | 影响 tiling 计算 |
+| `B*M*K ≤ 2^26`、`B*N*K ≤ 2^26` | ✅ | 偏移量用 `int32_t` 计算，须防溢出 |
+| dtype 为 fp16 或 bf16，且 `x1`/`x2` 相同 | ✅ | 不同则无法计算 |
+| 不含 NaN/Inf、非空 Tensor | ❌ | 赛题 3.7 明确"题目用例不包含" |
+| 输出 dtype 为 fp32、形状 `(B,)` | ❌ | 由平台保证 |
+
+**设计取舍**：校验失败时**直接返回**，不尝试容错。理由是容错会让错误输入的
+失败延后到 device 阶段，排查成本更高。
+
+**待确认 `OQ-014`**：`run_kernel` 内如何上报错误。直调模式下没有
+`OP_LOGE` 之类框架接口，候选是 `AscendC::printf`（`gather.asc` 等示例用过）
+或 `std::cout`（host 侧）。上报方式不影响正确性，但影响排障效率。
+登记于 [`00_open_questions.md`](00_open_questions.md)。
+
+---
+
+## 5. dtype 到 kernel 模板的分派
+
+`x1`/`x2` 的 dtype 是**运行时值**（来自 `info_x1.tensors[0].dtype`），
+而 `MatmulType` 的 dtype 是**编译期模板参数**。故需要一次运行时分派。
+
+处理方式：把 `run_kernel` 写成"解析参数 → 分派"的薄层，
+**计算逻辑放进模板化的 `Launch<DTYPE, ISTRANS_A, ISTRANS_B>` 函数**，
+避免为每种组合重复代码：
 
 ```cpp
-void SetDimNum(size_t dim_num);                          // 设置维度个数
-void SetDim(size_t idx, const int64_t dim_value);        // 设置某个轴的值
-```
+template <typename T, bool ISTRANS_A, bool ISTRANS_B>
+__aicore__ inline void Launch(GM_ADDR x1, GM_ADDR x2, GM_ADDR y,
+                              int64_t coreNum, aclrtStream stream,
+                              int32_t B, int32_t M, int32_t N, int32_t K)
+{
+    /* host 侧算 tiling + 启动 device kernel */
+}
 
-故 `InferShape` 实现为：
+extern "C" void run_kernel(...)
+{
+    /* 校验 + 按 §3 解析 B/M/N/K */
+    const int32_t dtype = info_x1.tensors[0].dtype;
 
-```cpp
-ge::graphStatus InferShape(gert::InferShapeContext* context) {
-    const gert::Shape* x1_shape = context->GetInputShape(0);
-    gert::Shape* y_shape = context->GetOutputShape(0);
-    if (x1_shape == nullptr || y_shape == nullptr) {
-        return ge::GRAPH_FAILED;   // 指南明确要求防御式判空
+    if (dtype == 1) {                    // fp16
+        if (!transposeX1 && !transposeX2)      Launch<half,      false, false>(...);
+        else if (!transposeX1 && transposeX2)  Launch<half,      false, true >(...);
+        else if (transposeX1 && !transposeX2)  Launch<half,      true,  false>(...);
+        else                                   Launch<half,      true,  true >(...);
+    } else if (dtype == 2) {             // bf16
+        /* 同样四个分支，T = bfloat16_t */
     }
-    // B 恒为 x1 的第 0 维（见 4.1），输出恒为 1 维
-    y_shape->SetDimNum(1);
-    y_shape->SetDim(0, x1_shape->GetDim(0));
-    return ge::GRAPH_SUCCESS;
 }
 ```
 
-依据：指南"算子入图（GE 图）开发"一节的 `Unique` 示例，用法形如
-`y_shape_range->GetMax()->SetDimNum(1);` 与 `...->SetDim(0, 1);`，
-且该示例同样处于 `InferShape` 上下文。
+**模板实例数**：2 种 dtype × 4 种 transpose 组合 = **最多 8 份** device kernel 代码。
 
-**待确认 C（已降级）**：判空宏 `OPS_CHECK_NULL_WITH_CONTEXT(context, ptr)`
-出现在官方示例中，但指南**没有它的独立定义节**，故其所属头文件未确认。
-当前写法用显式 `nullptr` 判断，不依赖该宏；阶段 3 若确认宏可用可替换。
+**待确认 `OQ-012`**（登记册）：平台评测 15 个用例时是否为每个用例**独立编译**。
+若是，则每次编译只涉及一种 dtype，实际为 4 份；若否，则 8 份全在，
+编译耗时与代码体积都会翻倍。该代价需在阶段 4 写 kernel 前用首次提交的耗时推断。
 
-**待确认 D**：用 `GetStorageShape()` 还是 `GetOriginShape()` 读取。
-`GetInputShape(0)` 返回 `gert::StorageShape*`，需再取其 shape。
-指南原文："`OriginShape` 表示 aclTensor 在经历 transdata 节点前（如果存在该
-节点）的原始 shape"。`transposeX` 只是布局声明、不应引入 transdata 节点，
-故两者预期一致；但为稳妥，**统一取 `GetOriginShape()`**，并在阶段 6 用小样例
-确认两者一致。
-
-### 4.3 类型推导（InferDataType）
-
-输出恒为 FLOAT32，与输入 dtype 无关：
-
-```cpp
-ge::graphStatus InferDataType(gert::InferDataTypeContext* context) {
-    context->SetOutputDataType(0, ge::DT_FLOAT32);
-    return ge::GRAPH_SUCCESS;
-}
-```
-
-注意这与 `MatmulAbs` 范例不同：范例是 `SetOutputDataType(0, inputDataType)`
-（输出跟随输入）。本题输出恒为 FP32，**照抄范例会得到 FP16 输出**。
+**待确认 `OQ-009`**（登记册）：device kernel 用 `__global__ __cube__` 还是
+`__global__ __vector__`。模板注释给的是 `__cube__`（`template/kernel.asc:13`），
+而 devkit 直调示例多数为 `__vector__`；两者在官方示例中分别有 73 与 200 处使用，
+故都存在。首次提交时确认。
 
 ---
 
-## 5. 输入约束（是否在 host 侧校验）
+## 6. 三个张量的角色
 
-赛题 3.4 给出的约束：
+| 张量 | dtype | 逻辑形状 | 存储形状 | 备注 |
+| :--- | :--- | :--- | :--- | :--- |
+| `x1` | fp16 / bf16 | `(B, M, K)` | `(B,K,M)` 当 `transposeX1` | Query token embedding |
+| `x2` | 同 `x1` | `(B, K, N)` | `(B,N,K)` 当 `transposeX2` | Document token embedding |
+| `y` | fp32 | `(B,)` | `(B,)` | 每个 query-document pair 的分数 |
 
-| 约束 | 是否在 host 侧校验 | 理由 |
-| :--- | :--- | :--- |
-| `x1`、`x2` 均 3 维 | ✅ 校验 | 维数不对时后续 `GetDim` 会越界 |
-| `B` 相等且 `1 ≤ B ≤ 64` | ✅ 校验 | 不等时无法一一配对 |
-| `K` 相等且 `32 ≤ K ≤ 8192`、`K % 8 == 0` | ✅ 校验 | Cube 对 K 有对齐要求 |
-| `1 ≤ M, N ≤ 8192` | ✅ 校验 | 影响 tiling 计算 |
-| `B*M*K ≤ 2^26`、`B*N*K ≤ 2^26` | ✅ 校验 | 偏移量用 int32 计算，须防溢出 |
-| 输入 dtype 相同 | ✅ 校验 | 不同则无法计算 |
-| 不含 NaN/Inf、非空 Tensor | ❌ 不校验 | 赛题 3.7 明确"题目用例不包含" |
-
-**设计取舍**：host 侧校验失败时返回 `ge::GRAPH_FAILED`，而不是尝试容错。
-理由是容错会让错误输入的失败延后到 kernel 阶段，排查成本更高。
-
-**待确认 E**：host 侧报错的标准做法。指南未给出统一的错误上报接口，
-可选 `ge::GRAPH_FAILED` 返回值或 `OP_LOGE` 宏。**阶段 3 需确认 `OP_LOGE`
-的可用性与头文件**。
+**关键约定**：`transposeX1/X2` **只声明存储布局，不表示算子需要执行转置操作**
+（赛题 3.5、四.4）。四种组合都必须给出正确结果。
 
 ---
 
-## 6. TilingData 传递方式
+## 7. 与其它文档的关系
 
-指南给出**两套并存**的写法，本项目选定其一：
-
-| 方式 | 写法 | 出处 |
-| :--- | :--- | :--- |
-| **A（选用）** | `TilingData* t = context->GetTilingData<T>(); t->field = v;` | 指南"Host 侧 tiling 函数中对 TilingData 赋值" |
-| B | `TilingData t; t.set_field(v); t.SaveToBuffer(...); SetDataSize(...)` | 指南 `AddCustom` 与 `ReduceMax` 示例 |
-
-**选 A 的理由**：与官方 `matmul_abs_host.cpp` 范例一致；少一步序列化，
-少一类出错可能。
-
-指南对 A 的两条硬约束，实现时必须遵守：
-
-1. **"`GetTilingData` 获取的 TilingData 不包含初值，需显式赋值"** ——
-   每个字段都必须赋值，不能依赖默认值。
-2. **禁止用基类取派生类**：`context->GetTilingData<A>()` 而实际是 `B`
-   "不支持，会触发未知问题"。本项目 TilingData 为单一扁平结构，不涉及继承。
-
-字段清单见 `02_tiling_data.md`。
+| 文档 | 关系 |
+| :--- | :--- |
+| [`02_tiling_data.md`](02_tiling_data.md) | 定义 `run_kernel` 内计算的 tiling 结构与字段 |
+| [`03_matmul_layouts.md`](03_matmul_layouts.md) | 定义四种 transpose 组合下 `MatmulType` 的接法与三处一致性规则 |
+| [`04_kernel_pipeline.md`](04_kernel_pipeline.md) | 定义 device kernel 的流水与两级归约 |
+| [`../platform/00_platform_mechanics.md`](../platform/00_platform_mechanics.md) | 平台侧机制、构建方式、可改文件范围 |
 
 ---
 
-## 7. 待确认事项
+## 8. 待确认事项
 
-本文件涉及 **`A`–`H`**（其中 `F` 已解决）。**完整列表、处置方式与状态见
-[`00_open_questions.md`](00_open_questions.md)** —— 该文件是唯一登记处，
-本节不复制其内容。
-
-正文中的就地说明仍保留在本文件对应小节：
+本文件涉及 **`OQ-009`、`OQ-012`、`OQ-014`**。完整列表与状态见
+[`00_open_questions.md`](00_open_questions.md)，本节不复制其内容。
 
 | 编号 | 就地位置 |
 | :--- | :--- |
-| `A` | §2.1 末 |
-| `B` | §3.2 末 |
-| `C`、`D` | §4.2 末 |
-| `E` | §5 末 |
-| `G` | §7.1 |
-| `H` | §3.4 末 |
+| `OQ-009` | §5 末（`__cube__` 还是 `__vector__`） |
+| `OQ-012` | §5 末（平台是否按用例独立编译） |
+| `OQ-014` | §4 末（`run_kernel` 内的错误上报方式） |
 
-### 7.1 关于 `G` 的补充说明
-
-**待确认 G**：平台是否提供"声明两个输入 dtype 必须相同"的声明式约束。
-指南提到 `DataType` 与 `Follow` 机制用于类型与形状的声明式推导，但
-**未找到"两个输入 dtype 必须相同"的确切写法**。当前设计放在 host 侧运行时校验；
-若框架有声明式支持，应优先使用框架校验（声明式约束在编译期生效，比运行时校验
-更早暴露问题）。登记于 [`00_open_questions.md`](00_open_questions.md)。
+> 早期版本中的算子原型、`InferShape`、`InferDataType`、属性声明与 TilingKey
+> 分派，均因直调模式而**整体取消**，不再是待确认项（见 §1.1）。
 
 ---
 
-## 8. 本文件的验收标准
+## 9. 本文件的验收标准
 
-- [x] 四种 transpose 组合下 `B/M/N/K` 的取值路径逐条写明（4.1）
-- [x] `InferShape` 与 `InferDataType` 的规则及与官方范例的差异写明（4.2、4.3）
-- [x] 属性的声明与读取写法均有指南原文依据（3.1、3.2）
-- [x] 多 dtype 与四布局的编译期分派方式已确定并给出依据（3.3、3.4）
-- [x] TilingData 传递方式已选定并说明理由（6）
-- [x] 所有无确切依据的条目集中列出并给出处置（7）
+- [x] 唯一契约入口 `run_kernel` 的签名与其 host 性质写明（§1）
+- [x] 直调模式下取消的机制逐条列出，避免误用（§1.1）
+- [x] `TensorInfo`/`TensorGroupInfo` 结构与 dtype 编码写明（§2）
+- [x] 四种 transpose 组合下 `B/M/N/K` 的读取路径写明且经实测反查（§3）
+- [x] 输入约束是否校验及理由写明（§4）
+- [x] dtype 与 transpose 的运行时分派方式写明，并说明其代价（§5）
+- [x] 新增待确认项按 `OQ-###` 编号登记（§8）

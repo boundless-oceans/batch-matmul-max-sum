@@ -40,18 +40,11 @@
 
 ## 2. 未决事项
 
-本节共 **23 项**：下表 21 项各有归属文档（含平台侧 3 项），2.1 节 2 项属于
+本节共 **17 项**：下表 15 项各有归属文档（含平台侧 3 项），2.1 节 2 项属于
 "验证手段是否成立"，无独立归属文档。共 25 项。
 
 | 编号 | 归属 | 事项 | 处置方式 | 预计消除于 |
 | :--- | :--- | :--- | :--- | :--- |
-| `A` | `01` §2.1 | `DataType({...})` 多 dtype 的语义：是"支持列表"还是"组合列表" | 按实际编译结果确认 | 阶段 3 |
-| `B` | `01` §3.2 | `GetAttrPointer<bool>` 的模板参数类型 | 依次尝试 `bool` / `int64_t` / `uint32_t` | 阶段 3 |
-| `C` | `01` §4.2 | 判空宏 `OPS_CHECK_NULL_WITH_CONTEXT` 的头文件来源 | 已改用显式 `nullptr` 判空，不依赖该宏；确认后可替换 | 阶段 3 |
-| `D` | `01` §4.2 | 读 shape 用 `GetStorageShape()` 还是 `GetOriginShape()` | 统一取 `GetOriginShape()`，验证两者一致 | 阶段 6 |
-| `E` | `01` §5 | host 侧错误上报接口（`OP_LOGE` 可用性） | 阶段 3 确认；不可用则退回 `ge::GRAPH_FAILED` | 阶段 3 |
-| `G` | `01` §7.1 | 平台是否提供"两个输入 dtype 必须相同"的声明式约束 | 当前放 host 侧运行时校验；若框架支持则改用声明式 | 阶段 3 |
-| `H` | `01` §3.4 | 四个 TilingKey 能否共用同一份 TilingData | 当前设计为共用（四者字段集与取值完全相同） | 阶段 3 |
 | `I` | `02` §3 | `TCubeTiling` 是普通 struct 还是 TilingData 类 | 按官方范例用 struct；报错则改用 `set_/get_` 访问器 | 阶段 3 |
 | `J` | `02` §3 | TilingData 字段用 `int32_t` 还是 `uint32_t` | 取 `int32_t` 与 Matmul 一致 | 阶段 3 |
 | `K` | `02` §4.1 | `baseM=baseN=128` 的 UB 占用能否支持双缓冲 | 用 `msprof` 实测后调整 | 阶段 4 / 7 |
@@ -66,6 +59,7 @@
 | `OQ-009` | `platform` §7 | 模板注释用 `__global__ __cube__`，而 devkit 直调示例全用 `__global__ __vector__` | 优先按模板给的 `__cube__` 写；编译报错则改 `__vector__` | 阶段 6 |
 | `OQ-012` | `platform` §7 | 平台是否为 15 个用例各自独立编译 | 影响 dtype 分派策略与编译耗时；由首次提交的耗时推断 | 阶段 6 |
 | `OQ-013` | `platform` §3.3 | `run_kernel` 所在的 `kernel.asc` 由带 `--npu-arch` 的 Ascend 编译器处理，host 侧的 `platform_ascendc` 与 `MultiCoreMatmulTiling` 能否在同一编译单元内正常使用，无 Matmul 直调实例可佐证 | 首次提交时验证；不可行则在 host 侧自行推导 tiling 参数而不依赖 tiling API | 阶段 6 |
+| `OQ-014` | `01` §4 | `run_kernel` 内的错误上报方式（无 `OP_LOGE` 类框架接口） | 候选 `AscendC::printf` 或 host 侧 `std::cout`；不影响正确性，影响排障效率 | 阶段 4 |
 
 ### 2.1 两条与验证方法本身有关的未决项
 
@@ -97,6 +91,7 @@
 | 原 `F`：`K` 是否须为 `baseK` 的整数倍 | 无需关心，`baseK` 由 Matmul tiling API 内部决定 | `03` §6 |
 | `OQ-010`：结构体能否按值传给 `<<<>>>` 启动的 kernel | **可以**。devkit 官方示例 `erf.asc:187` 即 `erf_custom<<<USED_CORE_NUM, 0, stream>>>(xDevice, yDevice, tiling)`，其中 `tiling` 为自定义结构体；kernel 声明为 `__global__ __vector__ void erf_custom(..., ErfCustomTilingData tiling)`。故 `TCubeTiling` 同样可按值传递 | `platform` §3 |
 | `OQ-008`：提交时哪些文件可改 | **可以**——平台上既能创建文件也能修改文件后提交，工程结构（`CMakeLists.txt` 等）可调。但评测时会替换 `main.asc` 与输入数据，故主要逻辑仍应集中在 `kernel.asc`，其余工程文件的作用是本地自测 | `platform` §7 |
+| `A`–`E`、`G`、`H` 共 7 项：`DataType({...})` 多 dtype 语义、`GetAttrPointer<bool>` 模板参数、`OPS_CHECK_NULL_WITH_CONTEXT` 头文件、`GetStorageShape` vs `GetOriginShape`、`OP_LOGE` 可用性、`Follow` 声明式 dtype 约束、TilingKey 共用 TilingData | **因直调模式而整体作废**——这些全是自定义算子工程框架特有的 API 或机制，直调下不存在（平台负责算子原型与形状/类型推导，transpose 为函数参数，无 TilingKey、无框架上下文）。其中错误上报一项由 `OQ-014` 取代 | `01` §1.1 |
 | `OQ-011`：`availableCoreNum` 与 kernel 内 `GetBlockNum()` 的关系 | **同源**。官方直调示例 `gather.asc:54-63` 用 `PlatformAscendCManager::GetInstance()` 取 `GetCoreNumAiv()` 作为 block 数，与模板中 `main.asc` 经 `aclrtGetDeviceInfo(ACL_DEV_ATTR_CUBE_CORE_NUM)` 取得的值来源一致。故可直接用 `availableCoreNum` 作 block 数 | `platform` §3.3 |
 
 ---
