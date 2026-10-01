@@ -61,6 +61,27 @@ template <typename T> struct LocalTensor {
     T GetValue(uint64_t) const { return T{}; }
 };
 
+// ---- 向量指令（按 devkit 实际签名建模）----
+// 元素级二元运算：Level 2 版本按 count 指定元素数
+template <typename T>
+void Mul(const LocalTensor<T>&, const LocalTensor<T>&, const LocalTensor<T>&, const int32_t&) {}
+
+template <typename T>
+void Add(const LocalTensor<T>&, const LocalTensor<T>&, const LocalTensor<T>&, const int32_t&) {}
+
+template <typename T>
+void Duplicate(const LocalTensor<T>&, const T&, const int32_t&) {}
+
+// WholeReduceSum：一次 repeat 归约整行；mask 为每 repeat 参与的元素数
+template <typename T>
+void WholeReduceSum(const LocalTensor<T>&, const LocalTensor<T>&, const int32_t,
+                    const int32_t, const int32_t, const int32_t, const int32_t) {}
+
+// BlockReduceSum：每次 repeat 只归约一个 datablock，结果写连续位置
+template <typename T>
+void BlockReduceSum(const LocalTensor<T>&, const LocalTensor<T>&, const int32_t,
+                    const int32_t, const int32_t, const int32_t, const int32_t) {}
+
 // TBuf：InitBuffer 只收长度（无 num 参数）—— 与 TQue 的三参数形式不同
 template <TPosition POS> struct TBuf {
     template <typename T> LocalTensor<T> Get() const { return {}; }
