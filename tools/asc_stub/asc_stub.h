@@ -1,0 +1,66 @@
+// 桩：模拟 Ascend 直调环境的最小接口，仅用于让 g++ 做语法/类型检查。
+// 不参与提交，不进入仓库（由 .gitignore 排除）。
+#pragma once
+#include <cstdint>
+#include <cstdio>
+#include <cmath>
+#include <utility>
+
+using GM_ADDR = uint8_t*;
+using aclrtStream = void*;
+
+struct TensorInfo { const int64_t* shape; int64_t numDims; int32_t dtype; };
+struct TensorGroupInfo { const TensorInfo* tensors; int64_t numTensors; };
+
+#define __global__
+#define __aicore__
+#define __gm__
+
+namespace AscendC {
+using ::TensorInfo; using ::TensorGroupInfo;
+inline int64_t GetBlockNum() { return 1; }
+inline int64_t GetBlockIdx() { return 0; }
+template <typename T> struct GlobalTensor {
+    void SetGlobalBuffer(__gm__ T*, uint32_t) {}
+    void SetValue(uint32_t, T) {}
+};
+inline void printf(const char*, ...) {}
+}
+namespace platform_ascendc {
+class PlatformAscendC {};
+class PlatformAscendCManager {
+public:
+    static const PlatformAscendC* GetInstance(const char* = nullptr) { return nullptr; }
+};
+}
+namespace optiling { class TCubeTiling {}; }
+namespace matmul_tiling {
+enum class TPosition { GM };
+enum class CubeFormat { ND };
+enum class DataType { DT_FLOAT16, DT_BFLOAT16, DT_FLOAT };
+class MultiCoreMatmulTiling {
+public:
+    explicit MultiCoreMatmulTiling(const platform_ascendc::PlatformAscendC&) {}
+    void SetDim(int32_t) {}
+    void SetAType(TPosition, CubeFormat, DataType, bool) {}
+    void SetBType(TPosition, CubeFormat, DataType, bool) {}
+    void SetCType(TPosition, CubeFormat, DataType) {}
+    void SetBiasType(TPosition, CubeFormat, DataType) {}
+    void SetOrgShape(int32_t, int32_t, int32_t) {}
+    void SetShape(int32_t, int32_t, int32_t) {}
+    void SetBias(bool) {}
+    int64_t GetTiling(optiling::TCubeTiling&) { return 0; }
+};
+}
+
+// Ascend 的核函数限定符与 kernel launch 语法不是标准 C++，用桩模拟。
+#define __cube__
+#define __vector__
+namespace AscendC {
+// 桩只做参数类型检查，不求值也不真正调用内核函数。
+template <class F, class... Args,
+          class = decltype((void)std::declval<F>()(std::declval<Args>()...))>
+inline void LaunchKernel(int64_t, int64_t, aclrtStream, F, Args...) {}
+}
+// 把 kernel<<<a,b,c>>>(args) 重写为 AscendC::LaunchKernel(a,b,c,kernel,args)
+#define ASC_KERNEL_LAUNCH(kernel, a, b, c, ...) AscendC::LaunchKernel(a, b, c, kernel, ##__VA_ARGS__)
