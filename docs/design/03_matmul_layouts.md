@@ -1,7 +1,13 @@
 # 03 · 四种存储布局的 Matmul 接法
 
-`transposeX1` / `transposeX2` 是运行时属性，而 `MatmulType` 的 `ISTRANS` 是编译期
-模板参数。本文件确定四种组合各自的接法，以及**三处必须一致**的声明规则。
+`transposeX1` / `transposeX2` 是 `run_kernel` 的**运行时 `bool` 参数**，而
+`MatmulType` 的 `ISTRANS` 是编译期模板参数。本文件确定四种组合各自的接法，
+以及**三处必须一致**的声明规则。
+
+> **本文件已于阶段 2 修订。** 早期版本按算子工程编写，用算子属性与 `TilingKey`
+> 表达四种组合。直调模式下二者均不存在，改为 host 侧按 `bool` 值选择模板实例
+> （§3.1）。**`ISTRANS` 的语义、四种接法、三处一致性规则、`SetOrgShape` 填法
+> 均不受影响**——它们约束的是 Matmul API，与是否算子工程无关。
 
 依据：[`docs/research/api_findings.md`](../research/api_findings.md)（含官方原文引用与行号）。
 
@@ -58,15 +64,33 @@
 | false | `(B,K,N)` | `(B,K,N)` | 否 | `false` | `false` |
 | true | `(B,N,K)` | `(B,K,N)` | **是** | `true` | `true` |
 
-### 3.1 TilingKey 编码
+### 3.1 四种组合的分派方式
 
-`TilingKey = transposeX1 * 2 + transposeX2`，取值 0–3。编码依据见
-`01_operator_interface.md` 3.4。
+`transposeX1`/`transposeX2` 是 `run_kernel` 的**运行时 `bool` 参数**，
+而 `MatmulType` 的 `ISTRANS` 是**编译期模板参数**，故需要一次运行时分派。
+
+直调模式**没有 `TilingKey` 机制**（那属算子工程框架，见
+[`01_operator_interface.md`](01_operator_interface.md) §1.1）。改用
+**host 侧按 `bool` 值选择模板实例**：
+
+```cpp
+template <typename T, bool ISTRANS_A, bool ISTRANS_B>
+__aicore__ inline void Launch(/* ... */);   // 薄层分派，见 01 §5
+
+if (!transposeX1 && !transposeX2)      Launch<T, false, false>(...);
+else if (!transposeX1 && transposeX2)  Launch<T, false, true >(...);
+else if (transposeX1 && !transposeX2)  Launch<T, true,  false>(...);
+else                                   Launch<T, true,  true >(...);
+```
+
+**代价**：device kernel 代码最多展开为 2 种 dtype × 4 种组合 = **8 份**。
+实际份数取决于平台是否为每个用例独立编译（`OQ-012`）。**不预先优化**——
+若编译耗时成为问题，再考虑减少实例数。
 
 下表是本文件的**核心对照表**——同一个转置决定必须在三个位置声明为同一值
 （三处一致性的完整说明见第 4 节）：
 
-| key | `transposeX1` | `transposeX2` | ① `MatmulType::ISTRANS`(A/B) | ② `SetTensorA/B` 第二参 | ③ `SetAType/SetBType` 第四参 |
+| 组合 | `transposeX1` | `transposeX2` | ① `MatmulType::ISTRANS`(A/B) | ② `SetTensorA/B` 第二参 | ③ `SetAType/SetBType` 第四参 |
 | :---: | :---: | :---: | :---: | :---: | :---: |
 | 0 | false | false | `false` / `false` | `false` / `false` | `false` / `false` |
 | 1 | false | true | `false` / `true` | `false` / `true` | `false` / `true` |
@@ -77,42 +101,39 @@
 `transposeX1` 只决定 A 侧，`transposeX2` 只决定 B 侧。
 不存在"两者同时为 true 才转置 A"这类交叉规则。
 
-阶段 3、4 实现时**按本表逐项核对**，不要凭记忆写。
+**实现时按本表逐项核对，不要凭记忆写。**
 
-### 3.2 kernel 侧写法
+### 3.2 device kernel 侧写法
+
+device kernel 是**模板函数**，`ISTRANS` 由 `Launch` 传入的模板实参固定，
+故 kernel 内部不再有运行时分派：
 
 ```cpp
-// BatchMatmulMaxSum 的 kernel 入口（TilingKey 已选定编译期分支）
-extern "C" __global__ __aicore__ void batch_matmul_max_sum(
-    GM_ADDR x1, GM_ADDR x2, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+// 模板参数 T 为 half 或 bfloat16_t；ISTRANS_A/B 由 host 侧分派固定
+template <typename T, bool ISTRANS_A, bool ISTRANS_B>
+__global__ __cube__ void batch_matmul_max_sum_custom(
+    __gm__ uint8_t* x1, __gm__ uint8_t* x2, __gm__ uint8_t* y,
+    BatchMatmulMaxSumTiling tiling)
 {
-    if (TILING_KEY_IS(0)) {
-        Process<false /*ISTRANS_A*/, false /*ISTRANS_B*/>(x1, x2, y, workspace, tiling);
-    } else if (TILING_KEY_IS(1)) {
-        Process<false, true>(x1, x2, y, workspace, tiling);
-    } else if (TILING_KEY_IS(2)) {
-        Process<true, false>(x1, x2, y, workspace, tiling);
-    } else if (TILING_KEY_IS(3)) {
-        Process<true, true>(x1, x2, y, workspace, tiling);
-    }
+    using aType = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND,
+                                      T, ISTRANS_A>;
+    using bType = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND,
+                                      T, ISTRANS_B>;
+    using cType = AscendC::MatmulType<AscendC::TPosition::VECIN, CubeFormat::ND, float>;
+    using biasType = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>;
+    AscendC::Matmul<aType, bType, cType, biasType> mm;
+
+    // 三处一致的第 2 处：
+    mm.SetTensorA(x1Global, ISTRANS_A);   // isTransposeA 与 ISTRANS_A 同值
+    mm.SetTensorB(x2Global, ISTRANS_B);   // isTransposeB 与 ISTRANS_B 同值
+    // ...
 }
 ```
 
-`Process` 内部：
+第 3 处（`SetAType`/`SetBType`）在 host 侧 `Launch` 内设置，见 §4。
 
-```cpp
-using aType = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND,
-                                  DTYPE_X1, ISTRANS_A>;
-using bType = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND,
-                                  DTYPE_X2, ISTRANS_B>;
-using cType = AscendC::MatmulType<AscendC::TPosition::VECIN, CubeFormat::ND, float>;
-using biasType = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>;
-AscendC::Matmul<aType, bType, cType, biasType> mm;
-
-// 三处一致的第 2、3 处：
-mm.SetTensorA(x1Global, ISTRANS_A);   // isTransposeA 与 ISTRANS_A 同值
-mm.SetTensorB(x2Global, ISTRANS_B);   // isTransposeB 与 ISTRANS_B 同值
-```
+**注意 `DTYPE_X1` 宏不再适用**：那个宏让单个 kernel 入口支持多 dtype，
+属算子工程机制。直调模式下 dtype 由 `Launch` 的模板实参 `T` 决定。
 
 `cType` 用 `float`：Cube 对 FP16/BF16 输入按 FP32 累加输出
 （依据：调研报告第 4 节 dtype 说明——"MatmulType 类型表规定 A/B 为
@@ -226,44 +247,57 @@ __aicore__ inline void SetOrgShape(int orgM, int orgN, int orgKa, int orgKb, int
 
 ---
 
-## 6. 与 `01_operator_interface.md` 的衔接
+## 6. 与其它文档的衔接
 
-本文件解决了该文件遗留的 **待确认 F**：
+本文件解决了 `01_operator_interface.md` 早期版本遗留的**原 `F`**：
 
 | 编号 | 事项 | 本文件的结论 |
 | :--- | :--- | :--- |
-| F | `K` 是否须为 `baseK` 的整数倍 | `baseK` 由 Matmul tiling API 内部决定，本项目不手工指定，无需关心 |
+| 原 `F` | `K` 是否须为 `baseK` 的整数倍 | `baseK` 由 Matmul tiling API 内部决定，本项目不手工指定，无需关心 |
 
-**关于该文件的待确认 D**：D 的内容是"读 shape 用 `GetStorageShape()` 还是
-`GetOriginShape()`"，本文件**不涉及**，仍由 `01_operator_interface.md` 4.2 节
-持有并待验证。
+**关于原 `D`**：`D` 是"读 shape 用 `GetStorageShape()` 还是 `GetOriginShape()`"，
+那是**算子工程**的接口。直调模式改为读 `TensorInfo`（见
+[`01_operator_interface.md`](01_operator_interface.md) §3），故 `D` **已随模式
+变更整体作废**，不再是待确认项（登记册第 3 节有记录）。
 
-本文件新增的是 **M**：第 5.3 节"填逻辑 shape"的结论涉及 `orgK` 取 `K` 还是
-`M` 的歧义，与 D 是两件不同的事，勿混淆。
+本文件自身的待确认项是 **`M`**（§5.4）：`SetOrgShape` 的 `orgK` 取 `K` 还是 `M`。
+这与原 `D` 是两件不同的事，勿混淆。
 
 ---
 
-## 7. 待确认事项汇总
+## 7. 待确认事项
 
-| 编号 | 事项 | 处置 |
+本文件涉及 **`M`、`N`**。**完整列表、处置方式与状态见
+[`00_open_questions.md`](00_open_questions.md)** —— 该文件是唯一登记处，
+本节不复制其内容。
+
+正文中的就地说明仍保留在本文件对应小节：
+
+| 编号 | 就地位置 | 事项 |
 | :--- | :--- | :--- |
-| M | `SetOrgShape` 填 `K` 还是 `M`（第 5.4 节两种解读） | 阶段 6 用 `M≠K` 的小样例一次试出 |
-| N | 转置时 `L1` buffer 尺寸是否需相应调整 | 依据 TCubeTiling 约束表，转置场景 `AL1Size` 的算法与非转置不同；由 tiling API 自动处理，若实测异常再查 |
+| `M` | §5.4 | `SetOrgShape` 的 `orgK` 填 `K` 还是 `M` |
+| `N` | §5.3 | 转置时 L1 buffer 尺寸是否需相应调整 |
 
-> 已解决条目（本文件自身范围内）：
-> - `ISTRANS` 的语义与三处一致性规则已明确（第 2、4 节）
-> - `SetOrgShape` 是否必须调用已确认（默认必须，第 5.1 节）
-> - 操作数分配无需"归一化"——`x1` 恒为 A、`x2` 恒为 B，只有转置标志随属性变化
->
-> 跨文件归属：**F 已解决**（第 6 节）。`01` 的 **D 未被本文件解决**，仍在 `01` 待验证。
+### 7.1 本文件已解决的事项
+
+以下不再是待确认项，结论已登记入册：
+
+- `ISTRANS` 的语义与三处一致性规则（§2、§4）
+- `SetOrgShape` 是否必须调用 —— 默认必须（§5.1）
+- 操作数分配无需"归一化"：`x1` 恒为 A、`x2` 恒为 B（§1）
+- 原 `F`：`K` 是否须为 `baseK` 的整数倍（§6）
+
+> 原 `D`（读 shape 用哪个接口）**已随模式变更整体作废**，见 §6。
 
 ---
 
 ## 8. 本文件的验收标准
 
-- [x] 四种组合各自的 A/B 转置需求逐条写明（第 3 节）
-- [x] `ISTRANS` 的语义及其与 `isTranspose` 的区别写明（第 2 节）
-- [x] `ISTRANS=false` 时强设 `isTranspose=true` 的后果写明（第 2.1 节）
-- [x] 三处一致性规则及其不一致后果写明（第 4 节）
-- [x] `SetOrgShape` 给出具体填法、理由与验证方法（第 5 节）
-- [x] 所有无确切依据的条目集中列出并给出处置（第 7 节）
+- [x] 四种组合各自的 A/B 转置需求逐条写明（§3）
+- [x] 四种组合的运行时分派方式写明，并说明其代价（§3.1）
+- [x] `ISTRANS` 的语义及其与 `isTranspose` 的区别写明（§2）
+- [x] `ISTRANS=false` 时强设 `isTranspose=true` 的后果写明（§2.1）
+- [x] 三处一致性规则及其不一致后果写明（§4）
+- [x] `SetOrgShape` 给出具体填法、理由与验证方法（§5）
+- [x] 与其它文档的衔接已更新，作废编号已说明（§6）
+- [x] 所有无确切依据的条目集中列出并给出处置（§7）

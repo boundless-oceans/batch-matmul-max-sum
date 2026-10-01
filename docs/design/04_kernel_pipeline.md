@@ -1,12 +1,17 @@
 # 04 · kernel 流水设计
 
-本文件确定 kernel 侧的计算流水：Cube 与 Vector 如何接续、两级归约如何实现、
-多核如何分工、输出如何按 batch 分流。阶段 4（`op_kernel`）必须逐条对应。
+本文件确定 device kernel 的计算流水：Cube 与 Vector 如何接续、两级归约如何实现、
+多核如何分工、输出如何按 batch 分流。
+
+> **本文件已于阶段 2 修订。** 流水设计本身（§1、§3、§5、§6）**不受模式变更
+> 影响**——它属算法层面，与是否算子工程无关。改动集中在平台相关表述：
+> 核数来源、tiling 传递、验证流程。
 
 前置依据：
-- [`01_operator_interface.md`](01_operator_interface.md) —— 接口与 TilingKey 分派
-- [`02_tiling_data.md`](02_tiling_data.md) —— TilingData 字段与行分配公式
+- [`01_operator_interface.md`](01_operator_interface.md) —— `run_kernel` 契约与 dtype/transpose 分派
+- [`02_tiling_data.md`](02_tiling_data.md) —— tiling 结构字段与行分配公式
 - [`03_matmul_layouts.md`](03_matmul_layouts.md) —— 四种布局的 Matmul 接法
+- [`../platform/00_platform_mechanics.md`](../platform/00_platform_mechanics.md) —— 平台机制与构建方式
 - [`simulator/tiling.py`](../../simulator/tiling.py) —— 切分规则的已实现版本
 - [`00_open_questions.md`](00_open_questions.md) —— 待确认事项登记册
 
@@ -96,7 +101,7 @@ using cType = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND, float>
 GM 路径的 format 是明确支持的（`matmul.h` 注释："get C matrix to GM,
 data format supports ND or NZ"）。代价是多一次 GM 读写往返，损失部分融合收益。
 
-**回退方案带来的额外设计约束**：需要在 TilingData 或 host 侧申请 workspace，
+**回退方案带来的额外设计约束**：需要在 `run_kernel` 内申请 workspace，
 尺寸为 `baseM × baseN × sizeof(float) × 核数 × 双缓冲`。
 `02_tiling_data.md` §5.2 的 `userWorkspaceSize` 目前填 0，回退时须改为实际值。
 
@@ -230,17 +235,21 @@ kernel 侧用 `AscendC::GetBlockNum()` 取 `num_cores`、`AscendC::GetBlockIdx()
 取 `core_id`（签名依据：`basic_api/kernel_operator_sys_var_intf.h:39/41`，
 均返回 `int64_t`）。
 
+**核数来源**：`run_kernel` 用其 `availableCoreNum` 参数作 `<<<>>>` 的 block 数，
+device kernel 内 `GetBlockNum()` 即读到同一值。二者同源的依据见
+[`../platform/00_platform_mechanics.md`](../platform/00_platform_mechanics.md) §3.3。
+
 ### 4.2 启动时的一致性校验
 
 指南示例中有 `ASSERT(GetBlockNum() != 0 && "block dim can not be zero!");`
 的用法，说明 `ASSERT` 在 kernel 侧可用。本项目在入口处校验：
 
 ```cpp
-ASSERT(GetBlockNum() == tilingData.usedCoreNum);   // 与 host 侧 SetBlockDim 一致
+ASSERT(GetBlockNum() == tiling.usedCoreNum);   // 与 host 侧传参一致
 ```
 
-`usedCoreNum` 与 `SetBlockDim` 的冗余是刻意的（见 `02` §2.1）：
-若 `SetBlockDim` 被漏调，表现为部分行无人计算、输出静默错误，
+`usedCoreNum` 与 `GetBlockNum()` 的冗余是刻意的（见 `02` §2.1）：
+若 `run_kernel` 传错核数或启动参数写错，表现为部分行无人计算、输出静默错误，
 而在入口处 `ASSERT` 可即刻发现。
 
 ### 4.3 不切 N 的原因
@@ -297,22 +306,62 @@ batch 边界**和** `baseM` tile 边界，两者的切分互不对齐。
 必须相加，而一个 batch 可能被多个核覆盖。倾向方案：
 host 侧在 tiling 时把行区间调整为 **batch 对齐**（每个 batch 的行区间不跨核），
 从而彻底消除跨核相加。代价是负载可能略不均衡，但换取实现简单与正确性。
-**该取舍需在阶段 3 定 tiling 时决定**，因为它同时影响 host 与 kernel。
+**该取舍需在写 tiling 之前决定**，因为它同时影响 `run_kernel` 与 device kernel。
 
 ---
 
-## 7. 上服务器后的验证顺序
+## 7. 提交后的验证策略
 
-按以下顺序逐步验证，每步只引入一个新变量，便于定位问题：
+### 7.1 约束：不能逐步验证
 
-| 步骤 | 内容 | 判定 |
+平台**不能自助跑测试**，只能通过正式提交看结果，且**每天上限 50 次**。
+故"每步只引入一个新变量、逐步验证"的传统做法**不成立**——那会消耗数十次提交。
+
+改为**面向少额提交**的两条策略：
+
+1. **提交前把能在本地暴露的问题全部暴露**（见 §7.2 预检清单）
+2. **把可合并的验证目标合并进同一次提交**，接受"一次失败可能对应多个原因"，
+   再用本地裁判对拍平台输出定位到具体原因
+
+### 7.2 提交前的预检清单
+
+本机无 CANN，编译不了，故逐项对照设计文档核对：
+
+| # | 检查项 | 依据 |
 | :--- | :--- | :--- |
-| 1 | `C_TYPE` 用 `VECIN` + `ND`，最小用例（`B=1, M=16, N=16, K=32`，无转置） | 与 golden 比对。**失败则执行 §2.3 回退方案** |
-| 2 | 同上，改 `baseM=baseN=16`，测 M/N 尾块（`M=17, N=13`） | 验证尾块处理 |
-| 3 | 测四种 TilingKey（四种 transpose 组合） | 验证 §3.4 的三处一致性 |
-| 4 | 测全负相似度用例 | 验证 `-inf` 初值 |
-| 5 | 测 `large_square`（多核、跨 batch） | 验证 §6 的跨核相加 |
-| 6 | 测 `k8192_max` | 验证 FP32 累加精度 |
+| 1 | 用到的每个 API 都能在 `docs/research/api_findings.md` 找到出处 | 该文件含官方原文引用与行号 |
+| 2 | 三处一致性：`MatmulType::ISTRANS` ↔ `SetTensorA/B` 第二参 ↔ `SetAType/SetBType` 第四参 | `03` §4 |
+| 3 | `run_kernel` 签名未被改动 | `01` §1 |
+| 4 | 未加 `main()` / `#pragma once` / include guard | `submit/README.md` |
+| 5 | 四种 transpose 组合的 `B/M/N/K` 读取路径正确 | `01` §3 |
+| 6 | 每个 tiling 字段都被显式赋值（局部变量无初值） | `02` §5.2 |
+| 7 | 算法逻辑已通过模拟器验证 | `simulator/` 的测试 |
+
+### 7.3 首次提交：最小可编译版本
+
+**首次提交不应包含算法逻辑**——`run_kernel` 只启动一个空 kernel。
+目的是**一次性暴露平台侧的未知项**，避免它们与算法错误混在一起：
+
+| 编号 | 该次提交要确认的 |
+| :--- | :--- |
+| `OQ-009` | `__cube__` 还是 `__vector__` |
+| `OQ-012` | 平台是否按用例独立编译（由耗时推断） |
+| `OQ-013` | host 侧 tiling API 能否在 Ascend 编译单元内使用（**优先级最高**） |
+| `OQ-015` | `TCubeTiling` 的定义来自哪个头文件 |
+| `OQ-017` | Matmul 是否需要 workspace |
+
+### 7.4 后续提交：按风险排序
+
+平台侧未知项消除后，剩余风险按"错了代价最大"排序验证：
+
+| 顺序 | 内容 | 为什么排这里 |
+| :--- | :--- | :--- |
+| 1 | `C_TYPE` 用 `VECIN` + `ND`，最小用例（`B=1, M=16, N=16, K=32`，无转置） | `OQ-003` 决定融合方案成败，**失败则执行 §2.3 回退方案** |
+| 2 | 四种 transpose 组合 | 验证 `03` §4 的三处一致性 |
+| 3 | M/N 尾块（`M=17, N=13`） | 验证 §5 |
+| 4 | 全负相似度用例 | 验证 `-inf` 初值（赛题 3.7 点名） |
+| 5 | `large_square`（多核、跨 batch） | 验证 §6 的跨核相加 |
+| 6 | `k8192_max` | 验证 FP32 累加精度 |
 
 **每一步的输入与期望输出都可由本地裁判生成**：
 
@@ -325,8 +374,8 @@ python3 -m judge.runner compare --cases cases_out --results <结果目录>
 
 ## 8. 待确认事项
 
-本文件新增 **`OQ-003` 至 `OQ-006`**，另有 `OQ-007`（见下）。
-完整列表与状态见 [`00_open_questions.md`](00_open_questions.md)。
+本文件涉及 **`OQ-003` 至 `OQ-007`**。完整列表与状态见
+[`00_open_questions.md`](00_open_questions.md)，本节不复制其内容。
 
 | 编号 | 就地位置 | 事项 |
 | :--- | :--- | :--- |
@@ -344,7 +393,7 @@ python3 -m judge.runner compare --cases cases_out --results <结果目录>
 - [x] Cube→Vector 交接方式确定，format 不确定性已登记并给出回退方案（§2）
 - [x] 两级归约的 API、签名与尾块处理写明（§3、§5）
 - [x] 归约只在 Vector 核执行这一事实已说明（§3.4）
-- [x] 多核分工公式与模拟器一致，并说明不切 N 的原因（§4）
+- [x] 多核分工公式与模拟器一致，核数来源已更新为 `availableCoreNum`（§4）
 - [x] 输出写回给出方案，未决部分（跨核相加）已登记（§6）
-- [x] 给出上服务器后的分步验证顺序（§7）
+- [x] 验证策略已改为面向少额提交，含预检清单与首次提交方案（§7）
 - [x] 新增待确认项已按 `OQ-###` 编号登记（§8）
