@@ -53,6 +53,8 @@ template <typename T> struct GlobalTensor {
     // （头文件 uint32_t index + 模板参数 S，impl uint64_t offset + PrimType）。
     // 桩按头文件形态建模；设备侧标量写 GM 有编译风险，见 API 台账。
     void SetValue(uint32_t, T) const {}
+    /* 偏移取子张量（SetTensorA(aG[off]) 的用法） */
+    GlobalTensor operator[](int64_t) const { return *this; }
 };
 
 template <typename T> struct LocalTensor {
@@ -165,3 +167,61 @@ inline void LaunchKernel(int64_t, int64_t, aclrtStream, F, Args...) {}
 }
 // 把 kernel<<<a,b,c>>>(args) 重写为 AscendC::LaunchKernel(a,b,c,kernel,args)
 #define ASC_KERNEL_LAUNCH(kernel, a, b, c, ...) AscendC::LaunchKernel(a, b, c, kernel, ##__VA_ARGS__)
+
+/* ============================================================
+ * Cube（Matmul 高阶 API）的最小桩
+ * ============================================================
+ * 真实的 Matmul 依赖 CANN 内部实现（kfc + matmul impl 共 4 万行），桩无法覆盖，
+ * 故 check_syntax.py 把相关头替换掉，改由这里的声明完成【语法与类型】检查。
+ * 语义正确性由 CANN 工具链的真实编译把关（local_build 的 make）。
+ *
+ * 【作用域务必与真实头一致】：
+ *   CubeFormat 在【全局作用域】（matmul_config.h）
+ *   TCubeTiling 在 AscendC::tiling（kernel_tiling.h）
+ *   MatmulType / Matmul 在 AscendC
+ * 放错作用域会导致未限定的 CubeFormat::ND 解析失败（实测踩过）。
+ */
+enum class CubeFormat { ND = 0, NZ, ZN, ZZ, NN, ND_ALIGN, NZ_ALIGN };
+
+namespace AscendC {
+namespace tiling {
+struct TCubeTiling {
+    int32_t usedCoreNum; int32_t M; int32_t N; int32_t Ka; int32_t Kb;
+    int32_t singleCoreM; int32_t singleCoreN; int32_t singleCoreK;
+    int32_t baseM; int32_t baseN; int32_t baseK;
+    int32_t depthA1; int32_t depthB1; int32_t stepM; int32_t stepN;
+    int32_t isBias; int32_t transLength; int32_t iterateOrder; int32_t shareMode;
+    int32_t shareL1Size; int32_t shareL0CSize; int32_t shareUbSize;
+    int32_t batchM; int32_t batchN; int32_t singleBatchM; int32_t singleBatchN;
+    int32_t stepKa; int32_t stepKb; int32_t depthAL1CacheUB; int32_t depthBL1CacheUB;
+    int32_t dbL0A; int32_t dbL0B; int32_t dbL0C;
+    int32_t ALayoutInfoB; int32_t ALayoutInfoS; int32_t ALayoutInfoN;
+    int32_t ALayoutInfoG; int32_t ALayoutInfoD;
+    int32_t BLayoutInfoB; int32_t BLayoutInfoS; int32_t BLayoutInfoN;
+    int32_t BLayoutInfoG; int32_t BLayoutInfoD;
+    int32_t CLayoutInfoB; int32_t CLayoutInfoS1; int32_t CLayoutInfoN;
+    int32_t CLayoutInfoG; int32_t CLayoutInfoS2;
+    int32_t BatchNum; int32_t mxTypePara;
+};
+}  // namespace tiling
+
+template <TPosition POS, CubeFormat FMT, typename T, bool IST = false,
+          int LM = 0, bool IBS = false>
+struct MatmulType {};
+
+template <class A, class B, class C, class BIAS = C, int CFG = 0>
+class Matmul {
+public:
+    __aicore__ inline void SetOrgShape(int, int, int) {}
+    __aicore__ inline void SetTensorA(const GlobalTensor<half>&, bool = false) {}
+    __aicore__ inline void SetTensorB(const GlobalTensor<half>&, bool = false) {}
+    __aicore__ inline bool Iterate(bool = false) { return false; }
+    template <bool sync = true>
+    __aicore__ inline void GetTensorC(const LocalTensor<float>&, uint8_t = 0, bool = false) {}
+};
+
+__aicore__ inline __gm__ uint8_t* GetSysWorkSpacePtr() { return nullptr; }
+}  // namespace AscendC
+
+#define REGIST_MATMUL_OBJ(pipe, ws, obj, tiling) ((void)0)
+
