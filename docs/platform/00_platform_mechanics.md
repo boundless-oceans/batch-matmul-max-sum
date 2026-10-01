@@ -270,7 +270,7 @@ case_output_specs = {
 | ~~`OQ-010`~~ | **已解决**：结构体可按值传给 kernel。官方示例 `erf.asc` 的启动写法为 `erf_custom<<<USED_CORE_NUM, 0, stream>>>(xDevice, yDevice, tiling)`，`tiling` 即自定义结构体 | `TCubeTiling` 同样适用 |
 | ~~`OQ-011`~~ | **已解决**：与 `availableCoreNum` 同源。见 §3.3 | → 已移入已解决 |
 | `OQ-012` | **待确认 OQ-012**：平台评测 15 个用例时是否为每个用例独立编译 | 影响 dtype 分派策略与编译耗时；由首次提交的耗时推断 |
-| `OQ-013` | 已移至 [`02_tiling_data.md` §5.1](../design/02_tiling_data.md) —— `run_kernel` 所在的 `kernel.asc` 由带 `--npu-arch` 的 Ascend 编译器处理，host 侧的 `platform_ascendc` 与 `MultiCoreMatmulTiling` 能否在同一编译单元内正常使用，无 Matmul 直调实例可佐证。**该问题决定 tiling 参数是算出来的还是推导出来的，优先级最高** |
+| `OQ-013` | 已移至 `02_tiling_data.md` §5.1 —— `run_kernel` 所在的 `kernel.asc` 由带 `--npu-arch` 的 Ascend 编译器处理，host 侧的 `platform_ascendc` 与 `MultiCoreMatmulTiling` 能否在同一编译单元内正常使用，无 Matmul 直调实例可佐证 | **该问题决定 tiling 参数是算出来的还是推导出来的，优先级最高** |
 
 ---
 

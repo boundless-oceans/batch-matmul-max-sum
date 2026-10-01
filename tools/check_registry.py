@@ -132,6 +132,41 @@ def find_ids_in_doc(text: str) -> set[str]:
     return found
 
 
+def _broken_tables(text: str) -> list[int]:
+    """返回列数不一致的表格块的起始行号（1-based）。代码围栏内的内容不检查。
+
+    **块界定方式**：以"连续的非空行"为一块（代码围栏内的行跳过）。不能用
+    "以 `|` 开头且以 `|` 结尾"来界定——缺尾竖线的坏行不满足该条件，
+    会把表格块提前切断，反而检不出错误。
+    """
+    lines = text.split("\n")
+    broken: list[int] = []
+    in_fence = False
+    block: list[tuple[int, int]] = []   # (行号, 竖线数)
+
+    def flush() -> None:
+        if len(block) >= 2 and len({c for _, c in block}) > 1:
+            broken.append(block[0][0])
+        block.clear()
+
+    for idx, raw in enumerate(lines):
+        if raw.strip().startswith("```"):
+            flush()
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if raw.strip() == "":
+            flush()
+            continue
+        if "|" in raw:
+            block.append((idx + 1, raw.count("|")))
+        else:
+            flush()
+    flush()
+    return broken
+
+
 def _headings(text: str) -> set[str]:
     """抽取 Markdown 中的节号（形如 `## 3.1 xxx` -> "3.1"）。"""
     return set(re.findall(r"^#{2,4}\s+(\d+(?:\.\d+)?)[\s.、]", text, re.M))
@@ -238,6 +273,14 @@ def main() -> int:
             target = (doc.parent / m.group(1)).resolve()
             if not target.exists():
                 problems.add(f"{doc.name} 中的链接失效: {m.group(1)}")
+
+    # --- 检查 7: Markdown 表格列数一致 ---
+    # 表格少一个 `|` 不会让任何断言失败，但会让渲染错乱、内容错位。
+    # 这类错误在手工编辑长表格时出现过两次。
+    table_docs = sorted(DESIGN_DIR.glob("*.md")) + [p for p in NAMED_DOCS.values() if p.is_file()]
+    for doc in table_docs:
+        for line_no in _broken_tables(doc.read_text(encoding="utf-8")):
+            problems.add(f"{doc.name}:{line_no} 附近表格列数不一致")
 
     # --- 检查 6: 登记册中的节号引用有效 ---
     # 文档重写会改变节号，而登记册里的 `NN` §X.Y 引用不会自动更新。

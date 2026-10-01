@@ -74,8 +74,9 @@
 **host 侧按 `bool` 值选择模板实例**：
 
 ```cpp
+// host 侧函数，不加 __aicore__（那是设备侧修饰符），见 01 §5
 template <typename T, bool ISTRANS_A, bool ISTRANS_B>
-__aicore__ inline void Launch(/* ... */);   // 薄层分派，见 01 §5
+inline void Launch(/* ... */);
 
 if (!transposeX1 && !transposeX2)      Launch<T, false, false>(...);
 else if (!transposeX1 && transposeX2)  Launch<T, false, true >(...);
@@ -210,6 +211,16 @@ __aicore__ inline void SetOrgShape(int orgM, int orgN, int orgKa, int orgKb, int
 ```
 
 因为赛题保证 A 与 B 的 K 相等（`Ka = Kb = K`），可用三参数版本。
+
+> **注意有两个同名接口，勿混用**：
+>
+> | 归属 | 签名 | 用在哪 |
+> | :--- | :--- | :--- |
+> | **Matmul 对象**（`matmul.h:94/103`） | `__aicore__ inline void SetOrgShape(...)` | **device 侧**，本项目用这个 |
+> | tiling 类（`matmul_tiling_base.h:387/395`） | `int32_t SetOrgShape(int32_t ...)` | host 侧 tiling 对象 |
+>
+> 本节讨论的是前者——`SetOrgShape` 是对 **Matmul 对象**调用的，而 Matmul 对象在
+> device kernel 内。
 
 ### 5.3 本项目的填法
 

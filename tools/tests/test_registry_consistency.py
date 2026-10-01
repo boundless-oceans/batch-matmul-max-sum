@@ -144,3 +144,24 @@ def test_checker_validates_section_references():
     # 节号排序：3.10 应排在 3.9 之后（字符串比较会错）
     assert mod._sec_key("3.10") > mod._sec_key("3.9")
     assert mod._sec_key("10.1") > mod._sec_key("9.9")
+
+
+def test_checker_detects_broken_table():
+    """校验器必须能检出 Markdown 表格列数不一致。
+
+    表格少一个竖线不会让任何断言失败，但会让渲染错乱、内容错位——这类错误
+    在手工编辑长表格时出现过两次。第一版实现只看"某些行不以 | 结尾"，
+    结果漏掉了"缺尾竖线"这一最常见的情形，故这里把各情形都钉死。
+    """
+    spec = importlib.util.spec_from_file_location("check_registry6", CHECKER)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod._broken_tables("| a | b |\n| - | - |\n| 1 | 2 |\n") == []
+    assert mod._broken_tables("| a | b |\n| - | - |\n| 1 | 2\n") == [1], "缺尾竖线须检出"
+    assert mod._broken_tables("| a | b |\n| - | - |\n| 1 | 2 | 3 |\n") == [1], "多一列须检出"
+    # 代码围栏内的表格不检查
+    assert mod._broken_tables("```\n| a | b |\n| 1 | 2 | 3 |\n```\n") == []
+    # 两个正常的独立表格不应误报
+    assert mod._broken_tables("| a | b |\n| - | - |\n\n| c | d |\n| - | - |\n") == []

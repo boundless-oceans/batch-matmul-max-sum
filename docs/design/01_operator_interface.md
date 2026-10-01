@@ -159,10 +159,13 @@ FLOAT16、BFLOAT16，输出恒为 fp32。
 避免为每种组合重复代码：
 
 ```cpp
+// 注意：Launch 是 host 侧函数，**不加 __aicore__**——那是设备侧修饰符。
+// 官方直调示例中的 host 函数（gather.asc 的 block_split、erf.asc 的
+// GenerateTilingData）均为普通函数，无任何设备侧修饰符。
 template <typename T, bool ISTRANS_A, bool ISTRANS_B>
-__aicore__ inline void Launch(GM_ADDR x1, GM_ADDR x2, GM_ADDR y,
-                              int64_t coreNum, aclrtStream stream,
-                              int32_t B, int32_t M, int32_t N, int32_t K)
+inline void Launch(GM_ADDR x1, GM_ADDR x2, GM_ADDR y,
+                   int64_t coreNum, aclrtStream stream,
+                   int32_t B, int32_t M, int32_t N, int32_t K)
 {
     /* host 侧算 tiling + 启动 device kernel */
 }
