@@ -60,6 +60,54 @@ def test_checker_detects_injected_fault(tmp_path: Path):
     assert mod.find_ids_in_doc(narrative) == set(), f"叙述句不应被识别: {mod.find_ids_in_doc(narrative)}"
 
 
+def test_checker_handles_all_marker_styles_used_in_repo():
+    """校验器必须识别仓库中**实际使用过的全部**标记写法。
+
+    这条是为了防止静默漏检：文档 04 曾把标记写成 ``**待确认 `OQ-004`**：``
+    （编号带反引号），若校验器的正则只认不带反引号的形式，就会漏掉该编号
+    却仍报告"一致"——比不检查更危险。
+    """
+    spec = importlib.util.spec_from_file_location("check_registry3", CHECKER)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    styles = {
+        "无修饰": "**待确认 A**：说明\n",
+        "括号注解": "**待确认 C（已降级）**：说明\n",
+        "编号带反引号": "**待确认 `OQ-004`**：说明\n",
+        "全角冒号": "**待确认 B**：说明\n",
+        "半角冒号": "**待确认 B**: 说明\n",
+    }
+    for name, text in styles.items():
+        got = mod.find_ids_in_doc(text)
+        assert len(got) == 1, f"标记写法「{name}」未被识别: 得到 {got}，原文 {text!r}"
+
+
+def test_checker_survives_real_docs():
+    """对仓库内真实文档跑一遍，确认每份文档都能解析出预期编号。"""
+    spec = importlib.util.spec_from_file_location("check_registry4", CHECKER)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    registry = mod.REGISTRY.read_text(encoding="utf-8")
+    open_items, _resolved, _desc = mod.parse_registry(registry)
+
+    design_dir = mod.DESIGN_DIR
+    for doc in sorted(design_dir.glob("0*.md")):
+        if doc.name == registry.rsplit("/", 1)[-1] or doc.name == mod.REGISTRY.name:
+            continue
+        ids = mod.find_ids_in_doc(doc.read_text(encoding="utf-8"))
+        # 该文档"归属"的编号必须全部被识别出来——这是反向检查的前提
+        expected = {
+            i for i, owner in open_items.items()
+            if owner and owner.split()[0].strip("`").rstrip("`") == doc.name[:2]
+        }
+        missing = expected - ids
+        assert not missing, f"{doc.name} 中应识别到但未识别: {missing}（识别到 {ids}）"
+
+
 def test_checker_reports_missing_marker():
     """校验器解析出的编号集合应与登记册未决表可对账。"""
     spec = importlib.util.spec_from_file_location("check_registry2", CHECKER)
