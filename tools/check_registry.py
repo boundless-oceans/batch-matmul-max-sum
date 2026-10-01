@@ -304,7 +304,9 @@ def main() -> int:
     # --- 检查 7: Markdown 表格列数一致 ---
     # 表格少一个 `|` 不会让任何断言失败，但会让渲染错乱、内容错位。
     # 这类错误在手工编辑长表格时出现过两次。
-    table_docs = sorted(DESIGN_DIR.glob("*.md")) + [p for p in NAMED_DOCS.values() if p.is_file()]
+    # 扫整个 docs/ 而不只是设计文档：表格错误与文档归属无关，
+    # 平台文档里的表格同样会渲染错乱（本项目已发生过一次）。
+    table_docs = sorted((REPO_ROOT / "docs").rglob("*.md"))
     for doc in table_docs:
         for line_no in _broken_tables(doc.read_text(encoding="utf-8")):
             problems.add(f"{doc.name}:{line_no} 附近表格列数不一致")
