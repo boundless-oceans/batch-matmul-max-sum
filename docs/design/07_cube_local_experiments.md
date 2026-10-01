@@ -71,17 +71,39 @@ PlatformAscendCManager::GetInstance("Ascend910B2")     // 正常返回（实测�
 **结论**：Matmul 的对象构造、注册、设张量全部正常，**卡在 `IterateAll`**；
 且与 tiling 是手工构造还是 API 生成无关（两种都挂）。
 
-## 下一步（未完成）
+## 结论：CPU 仿真不支持 Cube 计算
 
-结论 8 的挂起待查。可排查方向：
+综合以下证据，**判定 CPU 仿真下无法执行 Cube 计算**：
 
-1. ~~`GetSysWorkSpacePtr()` 是否有效~~ → 已排除（非空）
-2. ~~手工 tiling 是否是不完整~~ → 已排除（真实 tiling 也挂）
-3. **`MatmulImpl` 的 `IterateAll` 是否被 CPU 仿真支持** —— 现在的首要嫌疑。
-   注意 `MatmulImpl` 的 `IterateAll` 面向 AIC（Cube 核）；而 `__mix__` 的 AIC
-   分支在仿真下不执行（结论 3）。若 `IterateAll` 内部依赖 AIC 侧的某些机制，
-   仿真下可能整体不可用。
-4. 可试：`Iterate`（分块迭代）代替 `IterateAll`，看是否同样挂
-5. 可试：矩阵尺寸换成 128×128×128（`baseM/baseN=64` 时 64 太小可能不满足约束）
+| 证据 | 现象 |
+| :--- | :--- |
+| `__mix__` 的 AIC 分支 | 不执行（结论 3） |
+| `Matmul` 的 `IterateAll` | 挂住，与 tiling 来源无关 |
+| **把核标记为 `__cube__`** | **堆损坏**（`malloc(): unaligned tcache chunk detected`） |
+| 核标记为 `__aicore__` | 链接失败（`auto derivate failed`） |
+
+**注意**：纯 `__cube__` 核函数（只做 `SetValue`）能执行（结论 5），但**一旦
+使用 Cube 能力（Matmul）就失败**。即"Cube 核能被调用，但 Cube 计算不能完成"。
+
+### 已排除的排查方向
+
+- ~~`GetSysWorkSpacePtr()` 无效~~ → 实测非空
+- ~~手工 tiling 不完整~~ → 真实 tiling 同样挂
+- ~~矩阵尺寸太小~~ → 未及验证，但前三项已足以判定
+
+### 对路线选择的影响
+
+**Cube 方案无法在本地迭代验证。** 若要做，只能盲提交，而本项目的经验是
+每次盲提交只暴露一个问题（宿主指针崩溃、`__aicore__` 缺失、`printf` 不合规、
+bf16 全错——四次平台反馈各暴露一类问题）。Cube 涉及的未知数远多于这些。
+
+**因此建议**：Cube 方案暂不推进，除非愿意承担多轮盲提交的成本。
+
+### 仍可尝试的方向（若日后重启本路线）
+
+1. 装 **ops 包**后看仿真是否有变化
+2. 试 `Iterate`（分块迭代）代替 `IterateAll`
+3. 矩阵尺寸换 128×128×128
+4. 查 CANN 是否提供 **Cube 仿真的专门模式**（非 `--run-mode=cpu`）
 
 **注意**：结论 8 未解决前，不应假定 Cube 方案可本地验证。
