@@ -123,3 +123,24 @@ def test_checker_reports_missing_marker():
     # 表头行不应被当作数据
     assert "事项" not in resolved, "表头行被误解析为已解决条目"
     assert "编号" not in open_items, "表头行被误解析为未决条目"
+
+
+def test_checker_validates_section_references():
+    """校验器必须能检出登记册中失效的节号引用。
+
+    这类漂移不触发任何断言：文档重写改变了节号，而登记册里的 `NN` §X.Y
+    引用不会自动更新，只是指向了一个不存在的节。加这条断言防止该检查
+    因正则失效而静默通过。
+    """
+    spec = importlib.util.spec_from_file_location("check_registry5", CHECKER)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # _headings 必须能抽出节号，且不把正文里的 "1." 之类误当标题
+    heads = mod._headings("## 1. 甲\n### 2.1 乙\n正文提到 3.4 节\n## 9. 丙\n")
+    assert heads == {"1", "2.1", "9"}, f"节号抽取有误: {heads}"
+
+    # 节号排序：3.10 应排在 3.9 之后（字符串比较会错）
+    assert mod._sec_key("3.10") > mod._sec_key("3.9")
+    assert mod._sec_key("10.1") > mod._sec_key("9.9")

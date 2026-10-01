@@ -85,9 +85,9 @@
 | `TCubeTiling.batchM/batchN` 等批维字段 | 官方标注"预留，开发者无需关注"，不可使用 | 调研阶段 |
 | 按行取 max 是否需要先 transpose | **不需要**。高阶 `ReduceMax<T, Pattern::Reduce::AR>` 直接支持 | 调研阶段 |
 | `baseN` 超过单 repeat mask 上限时的归约写法 | 已从设计上规避：选用 `AR` pattern 而非 `WholeReduceMax`，不受 mask 宽度限制 | `02` §4.2 |
-| `gert::Shape` 的写入接口 | `SetDimNum(size_t)` 与 `SetDim(size_t, int64_t)` | `01` §4.2 |
-| 多 dtype 的支持方式 | `DTYPE_<Arg>` 宏，可直接作 `MatmulType` 模板参数 | `01` §3.3 |
-| 四种布局的编译期分派机制 | TilingKey | `01` §3.4 |
+| ~~`gert::Shape` 的写入接口~~ | **已随模式变更作废**——直调模式改为读 `TensorInfo` 的 `shape` 数组，不使用 `gert::Shape` | `01` §3 |
+| ~~`DTYPE_<Arg>` 宏的多 dtype 支持~~ | **已随模式变更作废**——该宏属算子工程机制；直调下 dtype 由 `Launch` 的模板实参 `T` 决定 | `01` §5 |
+| ~~TilingKey 编译期分派~~ | **已随模式变更作废**——直调无 TilingKey 机制；改为 host 侧按运行时 `bool` 选择模板实例 | `01` §5、`03` §3.1 |
 | `SetOrgShape` 是否必须调用 | **默认必须**。`MatmulConfig::enableSetOrgShape` 默认为 true | `03` §5.1 |
 | `ISTRANS` 的语义及三处一致性要求 | 三处必须同值，否则"精度会有异常"（静默出错） | `03` §2、§4 |
 | 操作数是否需要"归一化"对调 | 不需要。`x1` 恒为 A、`x2` 恒为 B，只有转置标志随属性变化 | `03` §1 |

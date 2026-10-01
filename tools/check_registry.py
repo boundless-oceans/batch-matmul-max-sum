@@ -132,6 +132,16 @@ def find_ids_in_doc(text: str) -> set[str]:
     return found
 
 
+def _headings(text: str) -> set[str]:
+    """抽取 Markdown 中的节号（形如 `## 3.1 xxx` -> "3.1"）。"""
+    return set(re.findall(r"^#{2,4}\s+(\d+(?:\.\d+)?)[\s.、]", text, re.M))
+
+
+def _sec_key(sec: str):
+    """节号排序键："3.10" 排在 "3.9" 之后，而不是按字符串比较。"""
+    return tuple(int(x) for x in sec.split("."))
+
+
 def find_resolved_refs(text: str) -> set[str]:
     """找出文档中引用的**已解决**编号，形如 ``原 `F``` 或 ``已由 ... 解决``。"""
     return set(re.findall(r"原\s*`?([A-Z]|OQ-\d{3})`?", text))
@@ -228,6 +238,29 @@ def main() -> int:
             target = (doc.parent / m.group(1)).resolve()
             if not target.exists():
                 problems.add(f"{doc.name} 中的链接失效: {m.group(1)}")
+
+    # --- 检查 6: 登记册中的节号引用有效 ---
+    # 文档重写会改变节号，而登记册里的 `NN` §X.Y 引用不会自动更新。
+    # 这类漂移不会让任何断言失败，只能机械核对。
+    section_index: dict[str, set[str]] = {}
+    for doc in sorted(DESIGN_DIR.glob("0*.md")):
+        if doc.name == REGISTRY.name:
+            continue
+        section_index[doc.name[:2]] = _headings(doc.read_text(encoding="utf-8"))
+    for name, path in NAMED_DOCS.items():
+        if path.is_file():
+            section_index[name] = _headings(path.read_text(encoding="utf-8"))
+
+    for m in re.finditer(r"`(0[1-9]|platform)`\s*§(\d+(?:\.\d+)?)", registry_text):
+        doc_key, sec = m.group(1), m.group(2)
+        headings = section_index.get(doc_key)
+        if headings is None:
+            problems.add(f"登记册引用了未知文档 `{doc_key}`")
+        elif sec not in headings:
+            problems.add(
+                f"登记册引用 `{doc_key}` §{sec}，但该文档中不存在此节"
+                f"（现有节号：{' '.join(sorted(headings, key=_sec_key))}）"
+            )
 
     # --- 报告 ---
     print(f"登记册: {REGISTRY.name}")
