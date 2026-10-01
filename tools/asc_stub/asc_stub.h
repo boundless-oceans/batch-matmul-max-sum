@@ -6,6 +6,17 @@
 #include <cmath>
 #include <utility>
 
+// Ascend C 的设备侧数值类型。真实定义在 kernel_operator.h 提供的头文件里。
+// 这里用包装类型模拟"能隐式转 float"，以便语法检查覆盖取值路径。
+struct half {
+    unsigned short v;
+    operator float() const { return 0.0f; }
+};
+struct bfloat16_t {
+    unsigned short v;
+    operator float() const { return 0.0f; }
+};
+
 using GM_ADDR = uint8_t*;
 using aclrtStream = void*;
 
@@ -26,6 +37,10 @@ enum class TPosition { GM, VECIN, VECOUT, VECCALC };
 
 template <typename T> struct GlobalTensor {
     void SetGlobalBuffer(__gm__ T*, uint32_t) {}
+    // 注意：真实头文件里 GlobalTensor::SetValue 的**声明与实现签名不一致**
+    // （头文件 uint32_t index + 模板参数 S，impl uint64_t offset + PrimType）。
+    // 桩按头文件形态建模；设备侧标量写 GM 有编译风险，见 API 台账。
+    void SetValue(uint32_t, T) const {}
 };
 
 template <typename T> struct LocalTensor {

@@ -14,6 +14,8 @@ import pathlib
 import subprocess
 import sys
 
+import pytest
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHECKER = REPO_ROOT / "tools" / "check_submit_compliance.py"
 KERNEL = REPO_ROOT / "submit" / "kernel.asc"
@@ -65,33 +67,59 @@ def test_strip_comments_preserves_line_numbers():
     assert violations[0][0] == 5, f"应报第 5 行，实际 {violations[0][0]}"
 
 
-def test_checker_catches_each_forbidden_category(tmp_path):
+@pytest.mark.parametrize(
+    "name,injection",
+    [
+        ("printf", '        AscendC::printf("x");\n'),
+        ("ASSERT", "        ASSERT(1);\n"),
+        ("DumpTensor", "        AscendC::DumpTensor(t, 0, 1);\n"),
+        ("std::cout", "        std::cout << 1;\n"),
+        ("TODO", "        int TODO_x = 1;\n"),
+        ("phone", "        int a = 13812345678;\n"),
+        ("email", '        const char* e = "a@b.com";\n'),
+        ("abs_path", '        const char* p = "/home/someone/x";\n'),
+    ],
+)
+def test_checker_catches_each_forbidden_category(name, injection, tmp_path):
     """逐类注入不合规内容，全部必须被检出。
 
-    注入点用 `rfind` 定位**代码区**的锚点：`if ASCEND_IS_AIC {` 在头部注释里
-    也出现过，用 `index`（首次出现）会把内容注进注释、令测试假通过——
-    这一点也是实测踩过的。
+    **刻意用合成代码而不是在 kernel.asc 里注入**：早先版本把注入点锚在
+    `if ASCEND_IS_AIC {` 上（并用 rfind 定位代码区，因为该串在注释里也出现）。
+    kernel 改成纯向量实现后该锚点消失，测试立刻失败——**测试不该依赖被测
+    文件的内部结构**。改用合成代码后，测试只验证扫描器本身的能力。
     """
-    source = KERNEL.read_text(encoding="utf-8")
-    anchor = "    if ASCEND_IS_AIC {"
-    idx = source.rfind(anchor)
-    assert idx > 0, "注入锚点未找到（kernel.asc 结构已变？）"
+    skeleton = (
+        "#include \"kernel_operator.h\"\n"
+        "namespace {\n"
+        "void body() {\n"
+        "__INJECT__"
+        "}\n"
+        "}\n"
+    )
+    broken = tmp_path / f"synthetic_{name}.asc"
+    broken.write_text(skeleton.replace("__INJECT__", injection), encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(CHECKER), "--kernel", str(broken)],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    assert proc.returncode != 0, f"注入「{name}」后扫描器竟然通过了"
 
-    injections = {
-        "printf": '        AscendC::printf("x");\n',
-        "ASSERT": "        ASSERT(1);\n",
-        "DumpTensor": "        AscendC::DumpTensor(t, 0, 1);\n",
-        "std::cout": "        std::cout << 1;\n",
-        "TODO": "        int TODO_x = 1;\n",
-        "phone": "        int a = 13812345678;\n",
-        "email": '        const char* e = "a@b.com";\n',
-        "abs_path": '        const char* p = "/home/someone/x";\n',
-    }
-    for name, injection in injections.items():
-        broken = tmp_path / f"kernel_{name}.asc"
-        broken.write_text(source[:idx] + injection + source[idx:], encoding="utf-8")
-        proc = subprocess.run(
-            [sys.executable, str(CHECKER), "--kernel", str(broken)],
-            capture_output=True, text=True, cwd=REPO_ROOT,
-        )
-        assert proc.returncode != 0, f"注入「{name}」后扫描器竟然通过了"
+
+def test_clean_synthetic_code_passes(tmp_path):
+    """干净的合成代码必须通过——防止扫描器变成"一律报错"。"""
+    clean = tmp_path / "clean.asc"
+    clean.write_text(
+        "#include \"kernel_operator.h\"\n"
+        "namespace {\n"
+        "void body() {\n"
+        "    int32_t a = 1;\n"
+        "    /* 注释里出现 printf 不算违规 */\n"
+        "}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, str(CHECKER), "--kernel", str(clean)],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    assert proc.returncode == 0, f"干净代码被误报：\n{proc.stdout}\n{proc.stderr}"

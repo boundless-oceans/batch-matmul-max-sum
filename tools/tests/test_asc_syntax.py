@@ -91,8 +91,8 @@ def test_rewrite_strips_ascend_includes():
          "AscendC::GetBlockNum()",
          "AscendC::GetBlockNumX()"),
         ("launch 参数个数不对",
-         "y, info_y, B, M, N, Ka, yDtypeCode);",
-         "y, info_y, B, M);"),
+         "transposeX1 ? 1 : 0, transposeX2 ? 1 : 0, 2);",
+         "transposeX1 ? 1 : 0);"),
     ],
 )
 def test_checker_has_teeth(name, old, new, tmp_path):
