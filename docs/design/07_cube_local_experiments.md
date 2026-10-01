@@ -18,7 +18,7 @@
 | 5 | 纯 `__cube__` 核函数执行 | 写 77 得 77 | ✅ |
 | 6 | Matmul 在 `__cube__` 核里**可编译** | 需 `ASCENDC_CUBE_ONLY` + `lib/matmul_intf.h` | ✅ |
 | 7 | **tiling 可正确生成并传入** | `GetTiling` 返回 0、size=200、字段正确 | ✅ |
-| 8 | Matmul **执行时挂住** | 分步标记未能写入，进程超时 | ❌ 未解决 |
+| 8 | Matmul 到 `IterateAll` 时**挂住** | 分步标记停在 40 | ❌ 未解决 |
 
 ## 关键技术点
 
@@ -54,12 +54,34 @@ PlatformAscendCManager::GetInstance("Ascend910B2")     // 正常返回（实测�
 仅填 `M/N/Ka/Kb/baseM/baseN/baseK/usedCoreNum` 等少数字段后，Matmul
 进入死循环（超时）。**必须用 tiling API 生成完整 tiling**。
 
+## 分步定位结果（逐步加代码，每步都用标记值验证）
+
+探针写在**已有 kernel 的函数体开头**（不新增 `__global__` 函数——新增会导致
+框架的 `AscCPUKernelLaunch` 生成失败，这是此前多次探针崩溃的根因）。
+
+| 步 | 加入的代码 | 标记值 | 结果 |
+| :-: | :--- | :-: | :--- |
+| 0 | `GetSysWorkSpacePtr()` | 10 = 非空 | ✅ |
+| 1 | 构造 `Matmul` 对象 | 20 | ✅ |
+| 2 | `REGIST_MATMUL_OBJ`（手工 tiling） | 30 | ✅ |
+| 3 | `SetOrgShape` / `SetTensorA` / `SetTensorB` | 40 | ✅ |
+| 4 | **`IterateAll(cG)`** | 50 | ❌ **挂住** |
+| 4' | 同上，但换用宿主生成的真实 tiling | 50 | ❌ **仍挂住** |
+
+**结论**：Matmul 的对象构造、注册、设张量全部正常，**卡在 `IterateAll`**；
+且与 tiling 是手工构造还是 API 生成无关（两种都挂）。
+
 ## 下一步（未完成）
 
 结论 8 的挂起待查。可排查方向：
 
-1. `GetSysWorkSpacePtr()` 在仿真下是否为有效指针（Matmul 需要 workspace）
-2. tiling 的 `usedCoreNum` 与 `SetDim` 是否需与实际核数匹配
-3. `MatmulImpl` 在仿真下是否被支持（可能整体不支持，需改用别的路径）
+1. ~~`GetSysWorkSpacePtr()` 是否有效~~ → 已排除（非空）
+2. ~~手工 tiling 是否是不完整~~ → 已排除（真实 tiling 也挂）
+3. **`MatmulImpl` 的 `IterateAll` 是否被 CPU 仿真支持** —— 现在的首要嫌疑。
+   注意 `MatmulImpl` 的 `IterateAll` 面向 AIC（Cube 核）；而 `__mix__` 的 AIC
+   分支在仿真下不执行（结论 3）。若 `IterateAll` 内部依赖 AIC 侧的某些机制，
+   仿真下可能整体不可用。
+4. 可试：`Iterate`（分块迭代）代替 `IterateAll`，看是否同样挂
+5. 可试：矩阵尺寸换成 128×128×128（`baseM/baseN=64` 时 64 太小可能不满足约束）
 
 **注意**：结论 8 未解决前，不应假定 Cube 方案可本地验证。
