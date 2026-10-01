@@ -141,6 +141,46 @@ erf_custom<<<USED_CORE_NUM, 0, stream>>>(xDevice, yDevice, tiling);
 注意 `erf.asc` 用的是**编译期常量** `USED_CORE_NUM` 作 block 数；本题核数由
 `availableCoreNum` 运行时给出，故启动处 block 数应为运行时值。
 
+### 3.3 host 侧 tiling 与平台信息（直调模式下的写法）
+
+直调模式**没有 tiling context**，故不能像算子工程那样从
+`context->GetPlatformInfo()` 取平台对象。官方示例
+`asc-devkit/examples/03_simt_api/00_introduction/01_gather/general_gather/gather.asc:54-63`
+给出了替代写法：
+
+```cpp
+const auto& platformInfoMgr = platform_ascendc::PlatformAscendCManager::GetInstance();
+if (platformInfoMgr == nullptr) { /* 取平台信息失败 */ }
+uint32_t real_core_num = platformInfoMgr->GetCoreNumAiv();
+```
+
+`PlatformAscendCManager::GetInstance()` 有两个重载
+（依据：`asc-devkit/include/utils/tiling/platform/platform_ascendc.h:168-187`）：
+
+| 重载 | 用途 |
+| :--- | :--- |
+| `GetInstance()` | 默认，从真实设备取平台信息 |
+| `GetInstance(const char *customSocVersion)` | 指定 SoC 版本串，**官方示例仅在 `ASCENDC_CPU_DEBUG` 下使用** |
+
+而 `PlatformAscendC` 的构造函数需要 `fe::PlatFormInfos*`
+（同文件 `:104`），故**必须经 `PlatformAscendCManager` 取得**，不能自行构造。
+得到了 `PlatformAscendC*` 之后即可构造各类 tiling 对象：
+
+```cpp
+MultiCoreMatmulTiling cubeTiling(*platformInfoMgr);   // 与算子工程里的用法一致
+```
+
+**关于核数**：`gather.asc` 取 `GetCoreNumAiv()` 作 block 数，与模板中
+`main.asc` 经 `aclrtGetDeviceInfo(ACL_DEV_ATTR_CUBE_CORE_NUM)` 取到并传入
+`run_kernel` 的 `availableCoreNum` **是同一来源**。故 `OQ-011` 已解决：
+直接用 `availableCoreNum` 作 `<<<>>>` 的 block 数即可。
+
+**仍待确认**：`run_kernel` 位于 `kernel.asc` 内，而该文件由带 `--npu-arch` 的
+Ascend 编译器处理。host 侧的 `platform_ascendc` 与 `MultiCoreMatmulTiling`
+能否在**同一编译单元内**正常使用，尚无直调实例可直接佐证
+（`gather.asc` 的该段代码在 host 侧函数 `block_split` 中，是可用证据，
+但它是 SIMT 示例而非 Matmul 示例）。记为 `OQ-013`。
+
 ---
 
 ## 4. 本地测试流程
@@ -228,8 +268,9 @@ case_output_specs = {
 | ~~`OQ-008`~~ | **已解决**：平台上可以创建文件、也可以修改文件后提交，工程结构可调 | 仍建议把主要逻辑集中在 `kernel.asc`，因为评测时会替换 `main.asc` 与输入数据，工程文件的作用是本地自测 |
 | `OQ-009` | **待确认 OQ-009**：模板注释用的是 `__global__ __cube__`（`template/kernel.asc:13`），而 devkit 全部直调示例用的是 `__global__ __vector__`，两者差异未确认 | 优先按模板给的 `__cube__` 写；编译报错则改 `__vector__` |
 | ~~`OQ-010`~~ | **已解决**：结构体可按值传给 kernel。官方示例 `erf.asc` 的启动写法为 `erf_custom<<<USED_CORE_NUM, 0, stream>>>(xDevice, yDevice, tiling)`，`tiling` 即自定义结构体 | `TCubeTiling` 同样适用 |
-| `OQ-011` | **待确认 OQ-011**：`availableCoreNum` 与 kernel 内 `GetBlockNum()` 的关系；`blockNum` 是否应直接取 `availableCoreNum` | 首次提交时在 kernel 内打印两者比对 |
+| ~~`OQ-011`~~ | **已解决**：与 `availableCoreNum` 同源。见 §3.3 | → 已移入已解决 |
 | `OQ-012` | **待确认 OQ-012**：平台评测 15 个用例时是否为每个用例独立编译 | 影响 dtype 分派策略与编译耗时；由首次提交的耗时推断 |
+| `OQ-013` | **待确认 OQ-013**：`run_kernel` 所在的 `kernel.asc` 由带 `--npu-arch` 的 Ascend 编译器处理，host 侧的 `platform_ascendc` 与 `MultiCoreMatmulTiling` 能否在同一编译单元内正常使用，无 Matmul 直调实例可佐证 | 首次提交时验证；不可行则在 host 侧自行推导 tiling 参数，不依赖 tiling API |
 
 ---
 

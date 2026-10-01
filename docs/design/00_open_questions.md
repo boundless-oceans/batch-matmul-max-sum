@@ -64,8 +64,8 @@
 | `OQ-006` | `04` §6 | 跨核相加 `y[b]` 如何完成 | 倾向改为 batch 对齐切分以消除跨核相加；该取舍需在阶段 3 定 tiling 时决定 | 阶段 3 |
 | `OQ-007` | `04` §3.1 | 不传 `sharedTmpBuffer` 的 `ReduceMax` 重载，框架自动申请的临时空间是否足够 | 若不足则改用手动版本并调用 `GetReduceMaxMaxMinTmpSize` | 阶段 4 / 6 |
 | `OQ-009` | `platform` §7 | 模板注释用 `__global__ __cube__`，而 devkit 直调示例全用 `__global__ __vector__` | 优先按模板给的 `__cube__` 写；编译报错则改 `__vector__` | 阶段 6 |
-| `OQ-011` | `platform` §7 | `availableCoreNum` 与 kernel 内 `GetBlockNum()` 的关系 | 首次提交时在 kernel 内打印两者比对 | 阶段 6 |
 | `OQ-012` | `platform` §7 | 平台是否为 15 个用例各自独立编译 | 影响 dtype 分派策略与编译耗时；由首次提交的耗时推断 | 阶段 6 |
+| `OQ-013` | `platform` §3.3 | `run_kernel` 所在的 `kernel.asc` 由带 `--npu-arch` 的 Ascend 编译器处理，host 侧的 `platform_ascendc` 与 `MultiCoreMatmulTiling` 能否在同一编译单元内正常使用，无 Matmul 直调实例可佐证 | 首次提交时验证；不可行则在 host 侧自行推导 tiling 参数而不依赖 tiling API | 阶段 6 |
 
 ### 2.1 两条与验证方法本身有关的未决项
 
@@ -97,6 +97,7 @@
 | 原 `F`：`K` 是否须为 `baseK` 的整数倍 | 无需关心，`baseK` 由 Matmul tiling API 内部决定 | `03` §6 |
 | `OQ-010`：结构体能否按值传给 `<<<>>>` 启动的 kernel | **可以**。devkit 官方示例 `erf.asc:187` 即 `erf_custom<<<USED_CORE_NUM, 0, stream>>>(xDevice, yDevice, tiling)`，其中 `tiling` 为自定义结构体；kernel 声明为 `__global__ __vector__ void erf_custom(..., ErfCustomTilingData tiling)`。故 `TCubeTiling` 同样可按值传递 | `platform` §3 |
 | `OQ-008`：提交时哪些文件可改 | **可以**——平台上既能创建文件也能修改文件后提交，工程结构（`CMakeLists.txt` 等）可调。但评测时会替换 `main.asc` 与输入数据，故主要逻辑仍应集中在 `kernel.asc`，其余工程文件的作用是本地自测 | `platform` §7 |
+| `OQ-011`：`availableCoreNum` 与 kernel 内 `GetBlockNum()` 的关系 | **同源**。官方直调示例 `gather.asc:54-63` 用 `PlatformAscendCManager::GetInstance()` 取 `GetCoreNumAiv()` 作为 block 数，与模板中 `main.asc` 经 `aclrtGetDeviceInfo(ACL_DEV_ATTR_CUBE_CORE_NUM)` 取得的值来源一致。故可直接用 `availableCoreNum` 作 block 数 | `platform` §3.3 |
 
 ---
 
