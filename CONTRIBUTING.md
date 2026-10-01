@@ -111,6 +111,11 @@ docs: 补充 ROS 环境变量导致 pytest 加载失败的说明
 - **设备侧代码调用的函数必须标 `__aicore__`**。Ascend C 编译器区分宿主/设备侧，
   未标注的函数默认是宿主函数。见 [`LESSONS.md`](LESSONS.md) 九。
   由 `tools/check_device_calls.py` 检查（语法检查抓不到这一类）。
+- **临时调试代码必须包在 `#ifdef BMMS_LOCAL_PROBE` 块内**，且该宏只在本地
+  构建时定义。这样提交版本里它永不参与编译，而它的**存在本身**会被
+  `tools/check_submit_compliance.py` 拦下（必须删净才能提交）。
+  理由：本项目有过一次同类事故——`printf` 被当作探测手段留在提交里，
+  被平台判为"不合规内容"（见 [`LESSONS.md`](LESSONS.md) 八）。
 - **提交代码中不得留下任何调试输出**（`printf`、`ASSERT`、`DumpTensor` 等）。
   平台会判为"不合规内容"并拒绝提交。见 [`LESSONS.md`](LESSONS.md) 八。
   `tools/asc_stub/` **刻意不提供这些接口的桩**，误用会在本机语法检查时暴露。
