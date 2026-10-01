@@ -99,9 +99,34 @@ bf16 全错——四次平台反馈各暴露一类问题）。Cube 涉及的未�
 
 **因此建议**：Cube 方案暂不推进，除非愿意承担多轮盲提交的成本。
 
+## B2 实验：`MatmulClient`（`__mix__` 路径）同样挂住
+
+`Matmul` 在 CPU 调试模式下按宏二选一，两条路都试过：
+
+| 路径 | 核形态 | Matmul 类型 | 结果 |
+| :--- | :--- | :--- | :--- |
+| B1 | `__cube__` | `MatmulImpl`（需 `ASCENDC_CUBE_ONLY`） | 前 4 步通过，`IterateAll` 挂 |
+| **B2** | **`__mix__(1,2)`** | **`MatmulClient`**（不定义该宏） | 前 4 步通过，`IterateAll` 挂 |
+
+B2 的分步标记（探针写在已有 kernel 体内）：
+
+| 步 | 代码 | 标记 | 结果 |
+| :-: | :--- | :-: | :--- |
+| 1 | `__mix__` 核身份 | 102（AIV） | ✅ |
+| 2 | 构造 `MatmulClient` | 200 | ✅ |
+| 3 | `REGIST_MATMUL_OBJ` + `SetTensorA/B` | 400 | ✅ |
+| 4 | **`IterateAll(cG)`** | 500 | ❌ **挂住** |
+
+**结论：问题在 `Matmul` API 层，与核形态（`__cube__` / `__mix__`）和宏配置无关。**
+
 ### 仍可尝试的方向（若日后重启本路线）
 
-1. 装 **ops 包**后看仿真是否有变化
+0. **改用底层 `Mmad` 自行拼接**（最有希望）。仿真库 `libcpudebug.so` 中
+   **已实现 `MmadPvImpl`**，故 Cube 运算能力存在；只是高层 `Matmul` 的
+   `IterateAll` 不可用。需自建 `GM→L1→L0A/L0B→Mmad→L0C→GM` 数据流
+   （`DataCopy` / `LoadData` / `Mmad` / `Fixpipe`）。
+1. ~~装 **ops 包**~~ → 已排除：仿真库未定义任何指向 ops 的符号（未定义
+   Cube/Matmul 符号数为 0），`MmadPvImpl` 自带实现，与 ops 包无关
 2. 试 `Iterate`（分块迭代）代替 `IterateAll`
 3. 矩阵尺寸换 128×128×128
 4. 查 CANN 是否提供 **Cube 仿真的专门模式**（非 `--run-mode=cpu`）
