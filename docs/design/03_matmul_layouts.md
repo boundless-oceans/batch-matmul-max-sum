@@ -202,6 +202,12 @@ __aicore__ inline void SetOrgShape(int orgM, int orgN, int orgKa, int orgKb, int
 **本项目因不跨 batch 调用 `SetOrgShape`，填的是单 batch 的 `(M, N, K)`，
 不含 batch 维。**
 
+**待确认 N**：转置时 L1 buffer 尺寸是否需要相应调整。依据 TCubeTiling 的约束表，
+转置场景 `AL1Size` 的算法与非转置不同（转置时
+`AL1Size = CeilDiv(baseM, C0_size) * baseK * depthA1 * sizeof(A_type)`）。
+该计算应由 tiling API 内部处理；若实测出现 buffer 越界或结果异常再回头查。
+登记于 [`00_open_questions.md`](00_open_questions.md)。
+
 ### 5.4 为什么这是"无依据项"，以及如何验证
 
 调研报告将此事列为未确认，理由是文档只说 `SetOrgShape`"用于辅助 Matmul API
@@ -211,13 +217,12 @@ __aicore__ inline void SetOrgShape(int orgM, int orgN, int orgKa, int orgKb, int
 （连续行相距 M 个元素），故可能应填 `SetOrgShape(M, N, M, N)`。
 
 两种解读给出的 `orgM`/`orgN` 相同，**只有 `orgK` 不同**（`K` vs `M`）。
-故可用一个小样例一次试出：
 
-**验证方法（阶段 6 执行）**：取 `M ≠ K` 且两者不整除的输入，
-例如 `B=1, M=6, K=32, N=4`，`transposeX1=true, transposeX2=true`。
-两种填法下结果不同，与 golden 比对即可判定。
-
-**阶段 6 必须记录实测结论**，并回填到本节。
+**待确认 M**：`orgK` 究竟填 `K` 还是 `M`。§5.3 选择填 `K`（逻辑 shape），
+但属推断而非文档明文，需实测确认。验证方法：取 `M ≠ K` 且两者不整除的输入，
+例如 `B=1, M=6, K=32, N=4`，`transposeX1=true, transposeX2=true`；
+两种填法下结果不同，与 golden 比对即可判定。**阶段 6 必须记录实测结论并回填本节。**
+登记于 [`00_open_questions.md`](00_open_questions.md)。
 
 ---
 

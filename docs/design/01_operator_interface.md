@@ -326,29 +326,30 @@ ge::graphStatus InferDataType(gert::InferDataTypeContext* context) {
 
 ---
 
-## 7. 待确认事项汇总
+## 7. 待确认事项
 
-以下条目**未找到确切依据**，不得凭推测实现。阶段 3 编译时会逐一暴露，
-阶段 6 用小样例验证。
+本文件涉及 **`A`–`H`**（其中 `F` 已解决）。**完整列表、处置方式与状态见
+[`00_open_questions.md`](00_open_questions.md)** —— 该文件是唯一登记处，
+本节不复制其内容。
 
-| 编号 | 事项 | 处置 |
-| :--- | :--- | :--- |
-| A | `DataType({...})` 多 dtype 的语义（支持列表 vs 组合列表） | 按实际编译结果确认 |
-| B | `GetAttrPointer<bool>` 的模板参数类型 | 依次尝试 `bool`/`int64_t`/`uint32_t` |
-| C | 判空宏 `OPS_CHECK_NULL_WITH_CONTEXT` 的头文件来源 | 已改用显式判空，不依赖该宏；确认后可替换 |
-| D | `GetStorageShape()` vs `GetOriginShape()` | 统一用 `GetOriginShape()`，阶段 6 验证一致。**注意**：`03_matmul_layouts.md` 第 5.4 节的 `orgK` 歧义（填 `K` 还是 `M`）是另一件事，勿混淆 |
-| E | host 侧错误上报接口（`OP_LOGE` 可用性） | 阶段 3 确认 |
-| F | `K` 是否必须是 `baseK` 的整数倍 | **已解决**，见 `03_matmul_layouts.md` 第 6 节 |
-| G | 是否需要 `x1`/`x2` dtype 一致的框架级校验 | 见下方说明 |
-| H | 四个 TilingKey 能否共用同一份 TilingData | 当前设计为共用，阶段 3 验证 |
+正文中的就地说明仍保留在本文件对应小节：
 
-> 已解决的条目：`gert::Shape` 的写入接口已确认为 `SetDimNum(size_t)` 与
-> `SetDim(size_t, int64_t)`；多 dtype 支持方式已确认为 `DTYPE_<Arg>` 宏；
-> 四种布局的编译期分派已确认为 TilingKey 机制。三者不再是待确认项。
+| 编号 | 就地位置 |
+| :--- | :--- |
+| `A` | §2.1 末 |
+| `B` | §3.2 末 |
+| `C`、`D` | §4.2 末 |
+| `E` | §5 末 |
+| `G` | §7.1 |
+| `H` | §3.4 末 |
 
-**关于 G**：平台提供属性间/输入间的类型约束声明（指南提到 `DataType` 与
-`Follow` 机制），但**未找到"声明两个输入 dtype 必须相同"的确切写法**。
-当前设计放在 host 侧运行时校验；若框架有声明式支持，应优先使用框架校验。
+### 7.1 关于 `G` 的补充说明
+
+**待确认 G**：平台是否提供"声明两个输入 dtype 必须相同"的声明式约束。
+指南提到 `DataType` 与 `Follow` 机制用于类型与形状的声明式推导，但
+**未找到"两个输入 dtype 必须相同"的确切写法**。当前设计放在 host 侧运行时校验；
+若框架有声明式支持，应优先使用框架校验（声明式约束在编译期生效，比运行时校验
+更早暴露问题）。登记于 [`00_open_questions.md`](00_open_questions.md)。
 
 ---
 
