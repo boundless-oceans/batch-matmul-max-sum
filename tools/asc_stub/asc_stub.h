@@ -47,6 +47,7 @@ enum class TPosition { GM, VECIN, VECOUT, VECCALC };
 
 template <typename T> struct GlobalTensor {
     void SetGlobalBuffer(__gm__ T*, uint32_t) {}
+    T GetValue(uint32_t) const { return T{}; }
     // 注意：真实头文件里 GlobalTensor::SetValue 的**声明与实现签名不一致**
     // （头文件 uint32_t index + 模板参数 S，impl uint64_t offset + PrimType）。
     // 桩按头文件形态建模；设备侧标量写 GM 有编译风险，见 API 台账。
@@ -56,6 +57,12 @@ template <typename T> struct GlobalTensor {
 template <typename T> struct LocalTensor {
     // devkit 中 LocalTensor::SetValue 采用 uint64_t offset，此处照此建模
     void SetValue(uint64_t, T) const {}
+    T GetValue(uint64_t) const { return T{}; }
+};
+
+// TBuf：InitBuffer 只收长度（无 num 参数）—— 与 TQue 的三参数形式不同
+template <TPosition POS> struct TBuf {
+    template <typename T> LocalTensor<T> Get() const { return {}; }
 };
 
 template <TPosition POS, int32_t DEPTH> struct TQue {
@@ -68,6 +75,8 @@ template <TPosition POS, int32_t DEPTH> struct TQue {
 struct TPipe {
     template <TPosition POS, int32_t DEPTH>
     void InitBuffer(TQue<POS, DEPTH>&, int32_t, int32_t) {}
+    template <TPosition POS>
+    void InitBuffer(TBuf<POS>&, int32_t) {}
 };
 
 template <typename T>

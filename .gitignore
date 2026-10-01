@@ -39,3 +39,6 @@ CMakeCache.txt
 
 # 本地仿真构建产物
 local_build/build_*/
+
+# 本地构建产物（任意层级的 build 目录）
+local_build/**/b/
