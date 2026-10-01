@@ -18,6 +18,8 @@ struct TensorGroupInfo { const TensorInfo* tensors; int64_t numTensors; };
 
 namespace AscendC {
 using ::TensorInfo; using ::TensorGroupInfo;
+// 刻意不提供 printf 的桩：平台禁止在提交代码中留下调试输出
+// （会被判为不合规内容）。不提供桩可使误用在本机语法检查时即暴露。
 inline int64_t GetBlockNum() { return 1; }
 inline int64_t GetBlockIdx() { return 0; }
 enum class TPosition { GM, VECIN, VECOUT, VECCALC };
@@ -54,7 +56,6 @@ struct DataCopyExtParams {
 template <typename T>
 inline void DataCopyPad(const GlobalTensor<T>&, const LocalTensor<T>&,
                         const DataCopyExtParams&) {}
-inline void printf(const char*, ...) {}
 }
 namespace platform_ascendc {
 class PlatformAscendC {};
