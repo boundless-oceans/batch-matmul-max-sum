@@ -100,6 +100,47 @@ target_compile_options(... $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${SOC_ARCH}>)
 **直接用到的头文件**（模板已给）：`acl/acl.h`、`kernel_operator.h`、
 `data_utils.h`（文件读写，host 侧用）。
 
+### 3.1 可修改的文件范围（已确认）
+
+平台上**既能创建文件，也能修改文件后提交**，故工程结构可调
+（`CMakeLists.txt` 等均可修改）。
+
+但有一条重要约束：**评测时会用平台自己的 `main.asc` 与输入数据替换掉本地的**
+——`main.asc` 里硬编码的是 case 0 的形状与文件路径，评测 15 个用例时显然必须
+由平台提供对应的宿主程序。
+
+因此工程分工应理解为：
+
+| 文件 | 角色 |
+| :--- | :--- |
+| `kernel.asc` | **实质交付物**，所有算子逻辑放这里 |
+| `main.asc` | 本地自测用；评测时被平台替换 |
+| `data_utils.h`、`CMakeLists.txt`、`run.sh`、`scripts/` | 本地自测脚手架 |
+
+**推论**：不要把必要逻辑放进 `main.asc`；更要紧的是**不要改动 `run_kernel`
+的签名**，因为平台的 `main.asc` 会按模板给定的签名调用它。
+
+### 3.2 结构体可按值传给 kernel（已确认）
+
+官方示例 `asc-devkit/examples/01_simd_cpp_api/04_advanced_api/10_math/erf/erf.asc`
+给出完整写法：
+
+```cpp
+struct ErfCustomTilingData { uint32_t totalLength; uint32_t tileNum; };
+
+__global__ __vector__ void erf_custom(__gm__ uint8_t* x, __gm__ uint8_t* y,
+                                      ErfCustomTilingData tiling);
+
+// host 侧启动
+erf_custom<<<USED_CORE_NUM, 0, stream>>>(xDevice, yDevice, tiling);
+```
+
+故 `TCubeTiling` 同样可按值传递：host 侧算完 tiling 直接作为 kernel 实参即可，
+**不需要** `GET_TILING_DATA` 之类的宏。
+
+注意 `erf.asc` 用的是**编译期常量** `USED_CORE_NUM` 作 block 数；本题核数由
+`availableCoreNum` 运行时给出，故启动处 block 数应为运行时值。
+
 ---
 
 ## 4. 本地测试流程
@@ -184,9 +225,9 @@ case_output_specs = {
 
 | 编号 | 事项 | 影响与处置 |
 | :--- | :--- | :--- |
-| `OQ-008` | **待确认 OQ-008**：提交时哪些文件可改。平台未说明；`main.asc`/`data_utils.h`/`CMakeLists.txt` 是否会被平台覆盖未知 | 决定能否调整工程结构。**保守做法：只改 `kernel.asc`** |
+| ~~`OQ-008`~~ | **已解决**：平台上可以创建文件、也可以修改文件后提交，工程结构可调 | 仍建议把主要逻辑集中在 `kernel.asc`，因为评测时会替换 `main.asc` 与输入数据，工程文件的作用是本地自测 |
 | `OQ-009` | **待确认 OQ-009**：模板注释用的是 `__global__ __cube__`（`template/kernel.asc:13`），而 devkit 全部直调示例用的是 `__global__ __vector__`，两者差异未确认 | 优先按模板给的 `__cube__` 写；编译报错则改 `__vector__` |
-| `OQ-010` | **待确认 OQ-010**：结构体（如 `TCubeTiling`）能否按值传给 `<<<>>>` 启动的 kernel。devkit 文档只给出语法 `kernel<<<block, dynUbSize, stream>>>(args...)`，未给出传结构体的实例 | 首次提交用最小样例验证；不可行则改传指针或拆成标量参数 |
+| ~~`OQ-010`~~ | **已解决**：结构体可按值传给 kernel。官方示例 `erf.asc` 的启动写法为 `erf_custom<<<USED_CORE_NUM, 0, stream>>>(xDevice, yDevice, tiling)`，`tiling` 即自定义结构体 | `TCubeTiling` 同样适用 |
 | `OQ-011` | **待确认 OQ-011**：`availableCoreNum` 与 kernel 内 `GetBlockNum()` 的关系；`blockNum` 是否应直接取 `availableCoreNum` | 首次提交时在 kernel 内打印两者比对 |
 | `OQ-012` | **待确认 OQ-012**：平台评测 15 个用例时是否为每个用例独立编译 | 影响 dtype 分派策略与编译耗时；由首次提交的耗时推断 |
 

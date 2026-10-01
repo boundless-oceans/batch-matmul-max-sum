@@ -40,7 +40,7 @@
 
 ## 2. 未决事项
 
-本节共 **25 项**：下表 23 项各有归属文档（含平台侧 5 项），2.1 节 2 项属于
+本节共 **23 项**：下表 21 项各有归属文档（含平台侧 3 项），2.1 节 2 项属于
 "验证手段是否成立"，无独立归属文档。共 25 项。
 
 | 编号 | 归属 | 事项 | 处置方式 | 预计消除于 |
@@ -63,9 +63,7 @@
 | `OQ-005` | `04` §6 | 从 UB 向 GM 写单个 float 的推荐方式 | 当前设计为先在 UB 内整理成连续块再一次性写出 | 阶段 4 / 6 |
 | `OQ-006` | `04` §6 | 跨核相加 `y[b]` 如何完成 | 倾向改为 batch 对齐切分以消除跨核相加；该取舍需在阶段 3 定 tiling 时决定 | 阶段 3 |
 | `OQ-007` | `04` §3.1 | 不传 `sharedTmpBuffer` 的 `ReduceMax` 重载，框架自动申请的临时空间是否足够 | 若不足则改用手动版本并调用 `GetReduceMaxMaxMinTmpSize` | 阶段 4 / 6 |
-| `OQ-008` | `platform` §7 | 提交时哪些文件可改——平台未说明 | 保守做法：只改 `kernel.asc`；若平台反馈允许改工程文件再调整 | 阶段 5 |
 | `OQ-009` | `platform` §7 | 模板注释用 `__global__ __cube__`，而 devkit 直调示例全用 `__global__ __vector__` | 优先按模板给的 `__cube__` 写；编译报错则改 `__vector__` | 阶段 6 |
-| `OQ-010` | `platform` §7 | 结构体（如 `TCubeTiling`）能否按值传给 `<<<>>>` 启动的 kernel | 首次提交用最小样例验证；不可行则改传指针或拆成标量 | 阶段 6 |
 | `OQ-011` | `platform` §7 | `availableCoreNum` 与 kernel 内 `GetBlockNum()` 的关系 | 首次提交时在 kernel 内打印两者比对 | 阶段 6 |
 | `OQ-012` | `platform` §7 | 平台是否为 15 个用例各自独立编译 | 影响 dtype 分派策略与编译耗时；由首次提交的耗时推断 | 阶段 6 |
 
@@ -97,6 +95,8 @@
 | `ISTRANS` 的语义及三处一致性要求 | 三处必须同值，否则"精度会有异常"（静默出错） | `03` §2、§4 |
 | 操作数是否需要"归一化"对调 | 不需要。`x1` 恒为 A、`x2` 恒为 B，只有转置标志随属性变化 | `03` §1 |
 | 原 `F`：`K` 是否须为 `baseK` 的整数倍 | 无需关心，`baseK` 由 Matmul tiling API 内部决定 | `03` §6 |
+| `OQ-010`：结构体能否按值传给 `<<<>>>` 启动的 kernel | **可以**。devkit 官方示例 `erf.asc:187` 即 `erf_custom<<<USED_CORE_NUM, 0, stream>>>(xDevice, yDevice, tiling)`，其中 `tiling` 为自定义结构体；kernel 声明为 `__global__ __vector__ void erf_custom(..., ErfCustomTilingData tiling)`。故 `TCubeTiling` 同样可按值传递 | `platform` §3 |
+| `OQ-008`：提交时哪些文件可改 | **可以**——平台上既能创建文件也能修改文件后提交，工程结构（`CMakeLists.txt` 等）可调。但评测时会替换 `main.asc` 与输入数据，故主要逻辑仍应集中在 `kernel.asc`，其余工程文件的作用是本地自测 | `platform` §7 |
 
 ---
 
