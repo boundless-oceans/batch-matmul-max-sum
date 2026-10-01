@@ -136,3 +136,93 @@ transposeX1=true（storage 为 (B,K,M)）
 - 确认无误后再：`cp local_build/kernel.asc submit/kernel.asc`
 
 **`submit/kernel.asc` 在开发期间保持不变**，不影响随时提交。
+
+---
+
+## 第二轮：正确调用序列的查证（重要）
+
+### 发现的真实 API 约束：`GetTensorC` 不能自由调用
+
+在循环里反复 `SetTensorA/SetTensorB` + `GetTensorC` 会触发：
+
+```
+[ASSERT] matmul_client.h:1273: Assertion `kfcMsg_.body.isFirstIter == 0'
+```
+
+**含义**：`GetTensorC` 必须在框架自身的迭代序列中被调用，不能当作普通的
+"取一块结果"来用。正确序列是：
+
+```cpp
+mm.SetOrgShape(singleCoreM, singleCoreN, K);
+mm.SetTensorA(aG[mOffset]);
+mm.SetTensorB(bG[nOffset]);
+while (mm.Iterate()) {            // Iterate 算一个 baseM x baseN 块
+    mm.GetTensorC(cLocal);        // 取该块（baseM x baseN，C 落 UB）
+}
+```
+
+**规格**：`Iterate` = 一个 `baseM x baseN` 块；`IterateAll` = 整个
+`singleCoreM x singleCoreN`。
+
+### 🔑 决定性结论：仿真的 Matmul 路径**整体没有实现**
+
+`adv_api/matmul/matmul.h` 的 `MatmulImpl`（CPU 模式下 `MatmulClient` 的基类）
+中：
+
+```cpp
+template <bool sync = true> __aicore__ inline bool Iterate(bool enPartialSum = false)
+{
+    return false;                  // <- 空实现，什么都不算
+}
+```
+
+结合此前三条证据：
+
+| 证据 | 结论 |
+| :--- | :--- |
+| `Mmad` 前后读 L0C 均为 0 | 低层 Cube 不算 |
+| `IterateAllCPU` 在 `#if ASCENDC_CPU_DEBUG` 内且要求 `ASCEND_IS_AIC` | 条件不满足 |
+| `MatmulImpl::Iterate/IterateAll` 直接 `return false` | 高层 API 是空壳 |
+| Vector 的 `Mul`/`WholeReduceSum` 结果正确 | **只有 Vector 有真实实现** |
+
+**故：Cube 路径无法在本地做任何数值验证。**
+
+### 这不全是坏事
+
+`Iterate` 返回 false ⇒ `while (Iterate())` 循环体不执行 ⇒ **不会触发断言**。
+所以 Cube 代码在本地的价值是：
+
+| 能做 | 不能做 |
+| :--- | :--- |
+| 编译检查（类型、API 签名、模板实例化）| 数值正确性 |
+| UB 容量/索引上界检查 | 性能 |
+| 不崩溃、不越界（对未进入的分支）| tiling 取值是否正确 |
+
+## 本轮已完成
+
+| 项 | 状态 |
+| :--- | :--- |
+| `Pack2`/`Unpack2` 位打包 | ✅ **本地单测 11/11 通过**（含负数、int32 极值、bmk_limit）|
+| `UnpackTiling`（50 字段）| ✅ 字段顺序脚本比对通过 |
+| `BuildTiling` + `PackTiling` | ✅ 编译通过 |
+| **25 个 int64 标量参数传递** | ✅ **编译通过**（规避了"不得传指针"的硬约束）|
+| Cube 内核（`batch_matmul_max_sum_cube`）| ✅ 编译通过 |
+| tiling 数学（分块覆盖 `[0,M)`）| ✅ 枚举 35 组，0 失败 |
+
+## 遗留（需要真机才能推进）
+
+| 项 | 说明 |
+| :--- | :--- |
+| `depthA1`/`stepM`/`stepKa` 等 tiling 字段取值 | 手算，**未经验证**——主要风险点 |
+| `GetTensorC` 的块序与 `cLocal` 布局 | 需真机确认（是 baseM×baseN 行主序？）|
+| bf16 输入 | 当前 Cube 内核按 fp16 硬编码 `MatmulType<..., half>` |
+| 双缓冲 / 多级流水 | 未做 |
+
+## 结论：Cube 路线的现实评估
+
+**可以在本地写、编译、做静态与容量检查，但无法验证任何数值或性能。**
+要真正推进 Cube，只有两条路：
+
+1. **拿到真机**（哪怕一次运行），否则每一轮都是盲改
+2. **先把本地能验证的部分做到极致**（架构、分块、归约、并行、workspace），
+   把 Cube 视为"最后一行替换"
