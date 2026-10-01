@@ -51,7 +51,6 @@
 | `M` | `03` §5.4 | `SetOrgShape` 的 `orgK` 填 `K` 还是 `M` | 用 `M≠K` 且不整除的小样例一次试出 | 阶段 6 |
 | `N` | `03` §5.3 | 转置时 L1 buffer 尺寸是否需相应调整 | 转置场景 `AL1Size` 算法与非转置不同；由 tiling API 自动处理，异常再查 | 阶段 6 |
 | `OQ-004` | `04` §3.3 | `ReduceSum` 的 pattern 版是否接受第二维为 1 的形状 `{n, 1}` | 若不被接受，改用基础 API `ReduceSum` 整体归约成标量 | 阶段 4 / 6 |
-| `OQ-005` | `04` §6 | 从 UB 向 GM 写单个 float 的推荐方式 | 当前设计为先在 UB 内整理成连续块再一次性写出 | 阶段 4 / 6 |
 | `OQ-007` | `04` §3.1 | 不传 `sharedTmpBuffer` 的 `ReduceMax` 重载，框架自动申请的临时空间是否足够 | 若不足则改用手动版本并调用 `GetReduceMaxMaxMinTmpSize` | 阶段 4 / 6 |
 | `OQ-019` | `05` §5.1 | 任务数少于核数时 `blockNum` 取 `min(availableCoreNum, total_tiles)` 还是仍用 `availableCoreNum` 让空闲核自行跳过 | 倾向后者（空闲核直接返回），实现更简单 | 阶段 6 |
 | `OQ-020` | `04` §0.3 | `__mix__` 的属性顺序。官方两处写法不同：`bare_mix.asc` 为 `extern "C" __global__ __mix__(1, 2) void`，而 `DataStoreBarrier.md` 为 `__mix__(1,2) __global__ __aicore__ void` | 取前者（可编译的工作代码）；若编译报错再换顺序 | 阶段 6 |
@@ -103,6 +102,7 @@
 | `OQ-013`：host 侧 tiling API 能否在 `kernel.asc` 内使用 | **可以**。官方直调示例 `matmul_fused.asc` 在同一 `.asc` 内构造 `matmul_tiling::MultiCoreMatmulTiling` 并调用 `PlatformAscendCManager::GetInstance()`；其 host 侧函数 `void GenerateTiling(...)`（`:203`）是普通函数、无 `__aicore__` | `02` §3.4 |
 | `OQ-015`：`TCubeTiling` 的定义来自哪个头文件 | `"kernel_tiling/kernel_tiling.h"`，另需 `"tiling/tiling_api.h"` 与 `"tiling/platform/platform_ascendc.h"`。结论取自 `matmul_fused.asc:14-20` 的实际 include 列表 | `02` §3.1 |
 | `OQ-003`：UB 输出路径的 C format（ND 还是 NZ） | **NZ**。`GetTensorC` 写 VECIN 的重载注释原文："`@param [out] co2Local: get C matrix to VECIN, data format only supports NZ`"（`adv_api/matmul/matmul.h:313`） | `04` §2.2 |
+| `OQ-005`：从 UB 向 GM 写单个 float 的方式 | **用 `DataCopyPad` + `DataCopyExtParams`**。`y` 只有 4–256 字节，而普通 `DataCopy` 按 32 字节块搬运，`B=1,2,3,4` 时均非块整数倍。关键是两套参数类型的区别：`DataCopyParams` 的 blockLen 以 32B 块计，`DataCopyExtParams` 的以字节计——非对齐数据必须用后者。依据 `data_copy_pad.asc:60-61` 的官方用法 | `04` §6 |
 | `OQ-006`：跨核相加 `y[b]` 如何完成 | **已解决**——决策为改为 batch 对齐切分，使每个 `y[b]` 只被一个核写，跨核相加问题从结构上消失。代价经实测量化几乎为零：12 个用例中 10 个的 `M ≤ 128`（仅 1 个 M-tile），那些用例在两种方案下都是单核；真正有差异的仅 `large_square`（6→8，变好）与 `m_large_n_small`（11→16，略降）。详见 `05_decision_batch_aligned.md` | `05` |
 
 ---

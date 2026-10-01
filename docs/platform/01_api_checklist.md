@@ -113,6 +113,46 @@
 | `matmul_tiling::DataType` | `DT_FLOAT = 0`、`DT_FLOAT16 = 1` | `matmul_tiling_base.h:36-37` | ✅ |
 | `matmul_tiling::DataType` bf16 | **`DT_BFLOAT16 = 33`** | `matmul_tiling_base.h:68` | ⚠️ 该枚举里**另有一个 `DT_BF16 = 27`**（同为"bf16 type"注释）。Matmul tiling 语境应用 `DT_BFLOAT16`——CANN 8.2 指南 `:87892` 在 `SetAType` 的 `DataType` 取值处即写 `DT_BFLOAT16`；`DT_BF16` 的其余出现均在算子注册语境（`ge::DT_BF16`） |
 
+### 归约 API（两级归约用）
+
+出处：`include/adv_api/reduce/reduce.h`（v9.0.0 行号）。
+
+| API | 真实签名 | 结论 |
+| :--- | :--- | :--- |
+| `ReduceMax`（带 tmp） | `template <class T, class pattern, bool isReuseSource = false> void ReduceMax(const LocalTensor<T>& dstTensor, const LocalTensor<T>& srcTensor, const LocalTensor<uint8_t>& sharedTmpBuffer, const uint32_t srcShape[], bool srcInnerPad)`（`:113`） | ✅ 函数体首行 `if ASCEND_IS_AIC { return; }` → **仅 Vector 核** |
+| `ReduceMax`（不带 tmp） | 同上签名去掉 `sharedTmpBuffer`（`:137`） | ✅ 内部 `PopStackBuffer` 自取临时空间 |
+| `ReduceSum`（带 tmp / 不带） | 与 `ReduceMax` 同构（`:216` / `:240`） | ✅ 同样仅 Vector 核 |
+| 参数 `srcShape` | "actual shape used to reduce information of input tensor, **its dim must be matched with pattern**" | 维数须与 pattern 字符数一致 |
+| 参数 `srcInnerPad` | "whether the last axis of input tensor is **padded to 32B aligned up**" | 末轴是否补齐到 32B |
+| `pattern` 字符含义 | "**each A/R represents a dimension**" | 按维序对应，见下 |
+
+**pattern 方向的确认（易错，已用实现代码交叉验证）**：
+
+`AR` = 第 0 维 A（keep）、第 1 维 R（reduce）→ **归约最后一轴**。
+两处实现证据：
+
+1. `reduce_max_v220_impl.h:47-53`：`if constexpr (AR) { BlockReduceByLastAxis(...) } else { BinaryReduceByFirstAxis(...) }`
+2. `reduce_sum_v220_impl.h:251-276`：`AR` 分支要求 `dstTensor.GetSize() >= first`（保留第一维），
+   `RA` 分支要求 `>= last`（保留最后一维）
+
+> ⚠️ 头文件里 "R means reduce axis, A means non-reduce axis" 的措辞容易让人以为
+> `AR` 是"先 reduce 后 keep"，从而误用 `RA`。**以实现代码为准**：
+> `(M, N)` 张量要提高沿 N 的最大值（保留 M）应用 **`AR`**。
+> 本项目 `04` §3.1 的映射表 `np.max(sim_tile, axis=1)` ↔ `Pattern::Reduce::AR` 是对的。
+
+### 搬运 API 的参数类型（易错）
+
+| 参数类型 | `blockLen` 单位 | 出处 | 用途 |
+| :--- | :--- | :--- | :--- |
+| `DataCopyParams` | **32 字节块** | `basic_api/kernel_struct_data_copy.h:48` | 块对齐搬运 |
+| `DataCopyExtParams` | **字节** | 同上 `:188`（构造 `(uint16_t count, uint32_t len, int64_t srcStride, int64_t dstStride, uint32_t rsv)`） | **非对齐搬运，写 `y` 用这个** |
+
+| API | 真实签名 | 结论 |
+| :--- | :--- | :--- |
+| `DataCopyPad` UB→GM（Ext 版） | `void DataCopyPad(const GlobalTensor<T>& dst, const LocalTensor<T>& src, const DataCopyExtParams&)` | ✅ **只收 Ext 参数，不收 pad 参数**（pad 参数仅用于 GM→UB） |
+| `DataCopyPad` UB→GM（旧版） | `void DataCopyPad(const GlobalTensor<T>& dst, const LocalTensor<T>& src, const DataCopyParams&)` | ✅ 另一重载，`blockLen` 以块计 |
+| `DataCopyPad` 官方用法 | `AscendC::DataCopyExtParams copyParams{1, 20 * sizeof(half), 0, 0, 0};` `AscendC::DataCopyPad(dstGlobal, dstLocal, copyParams);` | ✅ `data_copy_pad.asc:60-61`，注释明写"从 VECIN->GM 搬运 40 字节" |
+
 ### Matmul 对象接口（融合与优化用）
 
 出处：`adv_api/matmul/matmul.h`（v9.0.0 行号，与 v9.1 一致）。
@@ -143,8 +183,7 @@
 
 以下 API 计划使用但**尚未核对**，届时必须补入本台账：
 
-- `ReduceMax` / `ReduceSum` 的 `Pattern::Reduce::AR` 版本（**已确认存在**，见 `04` §3，
-  但**尚未核对签名**）
 - `SetAtomicAdd` / `DisableDmaAtomic`（仅在回到"batch 内切分"方案时需要）
 - `ASSERT` 的可用性
-- 从 UB 向 GM 写单个 float 的推荐方式（`OQ-005`）
+- `CrossCoreSetFlag` / `CrossCoreWaitFlag` 的 `modeId`/`flagId` 取值（`OQ-021`）
+- `REGIST_MATMUL_OBJ` 与 workspace（`OQ-022`）

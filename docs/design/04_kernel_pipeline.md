@@ -352,7 +352,32 @@ batch 边界**和** `baseM` tile 边界，两者的切分互不对齐。
 
 输出 `y` 形状 `(B,)`、FP32，每个 batch 一个标量。
 
-**待确认 `OQ-005`**：从 `LocalTensor` 向 GM 标量位置写单个 float 的推荐方式。
+**`OQ-005` 已解决**：用 **`DataCopyPad` + `DataCopyExtParams`**。
+
+`y` 只有 `B` 个 float（`B ∈ [1,64]`，即 **4–256 字节**），而普通 `DataCopy`
+按 **32 字节块**搬运——`B=1,2,3,4` 时输出都不是块的整数倍。两套参数类型的区别
+正是关键：
+
+| 参数类型 | `blockLen` 单位 | 适用 |
+| :--- | :--- | :--- |
+| `DataCopyParams` | **32 字节块** | 块对齐数据 |
+| `DataCopyExtParams` | **字节** | **非对齐数据，本项目用这个** |
+
+故每个核写自己负责的那段 `y[start:end)` 只需一次调用：
+
+```cpp
+// blockCount=1；blockLen 以字节计；只有一个块故两个 stride 均为 0；rsv 保留位为 0
+AscendC::DataCopyExtParams copyParams{1,
+    static_cast<uint32_t>(numBatchesOwned * sizeof(float)), 0, 0, 0};
+AscendC::DataCopyPad(yGm, yLocal, copyParams);      // UB -> GM
+```
+
+依据：官方示例 `examples/01_simd_cpp_api/02_features/03_basic_api/00_data_movement/data_copy_pad/data_copy_pad.asc:60-61`
+的用法 `DataCopyExtParams copyParams{1, 20 * sizeof(half), 0, 0, 0}` +
+`DataCopyPad(dstGlobal, dstLocal, copyParams)`（注释明写"从 VECIN->GM 搬运 40 字节"）。
+
+> 注意方向：UB→GM 的 `DataCopyPad` **只收 `DataCopyExtParams`，不收 pad 参数**
+> （pad 参数只用于 GM→UB 方向）。
 候选：
 
 1. `AscendC::DataCopy` 写单元素——需确认是否要求 32 字节对齐（若要求，
@@ -445,21 +470,25 @@ python3 -m judge.runner compare --cases cases_out --results <结果目录>
 
 ## 8. 待确认事项
 
-本文件涉及 **`OQ-003` 至 `OQ-007`**，以及 **`OQ-020`**（`__mix__` 属性顺序）、
-**`OQ-021`**（跨核 flag 取值）、**`OQ-022`**（是否需要 `REGIST_MATMUL_OBJ`）。
-完整列表与状态见
-[`00_open_questions.md`](00_open_questions.md)，本节不复制其内容。
+本文件涉及 **`OQ-004`、`OQ-007`、`OQ-020`、`OQ-021`、`OQ-022`**。
+完整列表与状态见 [`00_open_questions.md`](00_open_questions.md)，
+本节不复制其内容。
 
 | 编号 | 就地位置 | 事项 |
 | :--- | :--- | :--- |
-| `OQ-003` | §2.2 | UB 输出路径的 C format（ND 还是 NZ） |
 | `OQ-004` | §3.3 | `ReduceSum` 的 pattern 版是否接受 `{n, 1}` 形状 |
-| `OQ-005` | §6 | 从 UB 向 GM 写单个 float 的推荐方式 |
-| `OQ-006` | §6 | ~~跨核相加 `y[b]`~~ **已解决**，见 `05` |
 | `OQ-007` | §3.1 | 不传 `sharedTmpBuffer` 的 `ReduceMax` 重载，框架自动申请的临时空间是否足够 |
 | `OQ-020` | §0.3 | `__mix__` 的属性顺序（官方两处写法不同） |
 | `OQ-021` | §0.3 | `CrossCoreSetFlag` 的 `modeId` / `flagId` 取值 |
 | `OQ-022` | §0.3 | 是否需要 `REGIST_MATMUL_OBJ` 与 workspace |
+
+### 8.1 本文件已解决的事项
+
+以下不再是待确认项（结论已入册，就地说明保留在各节）：
+
+- `OQ-003`：UB 输出时 C 的 format **只能是 NZ**（§2.2）
+- `OQ-005`：写回用 `DataCopyPad` + `DataCopyExtParams`（§6）
+- `OQ-006`：跨核相加问题由 batch 对齐切分消除（§6，详见 `05`）
 
 ---
 

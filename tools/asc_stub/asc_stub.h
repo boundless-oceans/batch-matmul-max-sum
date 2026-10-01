@@ -45,6 +45,15 @@ struct TPipe {
 
 template <typename T>
 inline void DataCopy(const GlobalTensor<T>&, const LocalTensor<T>&, uint32_t) {}
+
+// DataCopyExtParams 的 blockLen 以**字节**计（对比 DataCopyParams 以 32B 块计）
+struct DataCopyExtParams {
+    DataCopyExtParams(uint16_t, uint32_t, int64_t, int64_t, uint32_t) {}
+};
+
+template <typename T>
+inline void DataCopyPad(const GlobalTensor<T>&, const LocalTensor<T>&,
+                        const DataCopyExtParams&) {}
 inline void printf(const char*, ...) {}
 }
 namespace platform_ascendc {
