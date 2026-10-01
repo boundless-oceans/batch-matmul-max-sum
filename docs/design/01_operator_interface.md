@@ -164,9 +164,7 @@ extern "C" __global__ __aicore__ void batch_matmul_max_sum(
 kernel 实现分支"的 tiling 输出，并给出确切用法：
 
 ```cpp
-// host 侧：按属性选定 key
-const bool t1 = *(attrs->GetAttrPointer<bool>(0));
-const bool t2 = *(attrs->GetAttrPointer<bool>(1));
+// host 侧：按属性选定 key（编码定义见 03_matmul_layouts.md 3.1，此处不重复）
 context->SetTilingKey(static_cast<uint64_t>(t1) * 2 + static_cast<uint64_t>(t2));
 
 // kernel 侧：常量折叠，每个 key 编译成独立入口
@@ -181,8 +179,6 @@ if (TILING_KEY_IS(0)) {
 }
 ```
 
-TilingKey 编码 `t1*2 + t2`，取值范围 0–3，与四种布局一一对应。
-
 **理由与代价**：
 
 - 指南原文说明该机制的用途是避免大函数分支造成的 icache miss ——
@@ -192,8 +188,10 @@ TilingKey 编码 `t1*2 + t2`，取值范围 0–3，与四种布局一一对应�
   `--tiling_keys` 只编译指定 key 以加速编译。本题 4 个 key，尚可接受。
 
 **待确认 H**：TilingData 是四个 key 共用一份结构，还是每个 key 各一份。
-官方示例中不同 key 对应不同 TilingData 类型的情况存在。**当前设计为共用一份**
-（字段集相同，只是 `istrans_x1`/`istrans_x2` 取值不同），阶段 3 验证是否可行。
+官方示例中不同 key 对应不同 TilingData 类型的情况存在。
+
+**当前设计为共用一份**：转置标志已编码进 TilingKey，故四个 key 的 TilingData
+**字段集与取值完全相同**（转置信息不进 TilingData，见 `02_tiling_data.md` 2.2 节）。
 
 ---
 
@@ -338,9 +336,9 @@ ge::graphStatus InferDataType(gert::InferDataTypeContext* context) {
 | A | `DataType({...})` 多 dtype 的语义（支持列表 vs 组合列表） | 按实际编译结果确认 |
 | B | `GetAttrPointer<bool>` 的模板参数类型 | 依次尝试 `bool`/`int64_t`/`uint32_t` |
 | C | 判空宏 `OPS_CHECK_NULL_WITH_CONTEXT` 的头文件来源 | 已改用显式判空，不依赖该宏；确认后可替换 |
-| D | `GetStorageShape()` vs `GetOriginShape()` | 统一用 `GetOriginShape()`，阶段 6 验证一致 |
+| D | `GetStorageShape()` vs `GetOriginShape()` | 统一用 `GetOriginShape()`，阶段 6 验证一致。**注意**：`03_matmul_layouts.md` 第 5.4 节的 `orgK` 歧义（填 `K` 还是 `M`）是另一件事，勿混淆 |
 | E | host 侧错误上报接口（`OP_LOGE` 可用性） | 阶段 3 确认 |
-| F | `K` 是否必须是 `baseK` 的整数倍 | 见 `04_kernel_pipeline.md` |
+| F | `K` 是否必须是 `baseK` 的整数倍 | **已解决**，见 `03_matmul_layouts.md` 第 6 节 |
 | G | 是否需要 `x1`/`x2` dtype 一致的框架级校验 | 见下方说明 |
 | H | 四个 TilingKey 能否共用同一份 TilingData | 当前设计为共用，阶段 3 验证 |
 

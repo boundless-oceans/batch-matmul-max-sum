@@ -223,12 +223,18 @@ __aicore__ inline void SetOrgShape(int orgM, int orgN, int orgKa, int orgKb, int
 
 ## 6. 与 `01_operator_interface.md` 的衔接
 
-本文件回答了该文件遗留的 **待确认 F** 与部分 D：
+本文件解决了该文件遗留的 **待确认 F**：
 
 | 编号 | 事项 | 本文件的结论 |
 | :--- | :--- | :--- |
 | F | `K` 是否须为 `baseK` 的整数倍 | `baseK` 由 Matmul tiling API 内部决定，本项目不手工指定，无需关心 |
-| D | 转置时 `SetOrgShape` 填什么 | 填逻辑 shape（第 5.3 节），阶段 6 用小样例验证 |
+
+**关于该文件的待确认 D**：D 的内容是"读 shape 用 `GetStorageShape()` 还是
+`GetOriginShape()`"，本文件**不涉及**，仍由 `01_operator_interface.md` 4.2 节
+持有并待验证。
+
+本文件新增的是 **M**：第 5.3 节"填逻辑 shape"的结论涉及 `orgK` 取 `K` 还是
+`M` 的歧义，与 D 是两件不同的事，勿混淆。
 
 ---
 
@@ -239,10 +245,12 @@ __aicore__ inline void SetOrgShape(int orgM, int orgN, int orgKa, int orgKb, int
 | M | `SetOrgShape` 填 `K` 还是 `M`（第 5.4 节两种解读） | 阶段 6 用 `M≠K` 的小样例一次试出 |
 | N | 转置时 `L1` buffer 尺寸是否需相应调整 | 依据 TCubeTiling 约束表，转置场景 `AL1Size` 的算法与非转置不同；由 tiling API 自动处理，若实测异常再查 |
 
-> 已解决条目：
+> 已解决条目（本文件自身范围内）：
 > - `ISTRANS` 的语义与三处一致性规则已明确（第 2、4 节）
 > - `SetOrgShape` 是否必须调用已确认（默认必须，第 5.1 节）
 > - 操作数分配无需"归一化"——`x1` 恒为 A、`x2` 恒为 B，只有转置标志随属性变化
+>
+> 跨文件归属：**F 已解决**（第 6 节）。`01` 的 **D 未被本文件解决**，仍在 `01` 待验证。
 
 ---
 

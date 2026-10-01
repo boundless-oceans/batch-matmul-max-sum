@@ -243,9 +243,9 @@ kernel 侧（或一个可在 CPU 上编译的等价函数）用同一批向量�
 | K | `baseM=baseN=128` 的 UB 占用能否支持双缓冲 | 阶段 4/7 用 `msprof` 实测调整 |
 | L | 行分配公式的跨语言一致性验证手段 | 阶段 4 生成测试向量（尚未实现） |
 
-> 本文件解决了 `01_operator_interface.md` 遗留的**待确认 F**（`K` 是否须为
-> `baseK` 的整数倍）：`baseK` 由 Matmul 的 tiling API 内部决定，
-> 本项目不手工指定，故无需关心该约束。
+> `01_operator_interface.md` 遗留的**待确认 F**（`K` 是否须为 `baseK` 的整数倍）
+> 已由 `03_matmul_layouts.md` 第 6 节解决：`baseK` 由 Matmul 的 tiling API
+> 内部决定，本项目不手工指定，故无需关心该约束。此处仅作指引，不重复归属。
 
 ---
 
