@@ -211,27 +211,31 @@ if ASCEND_IS_AIC { return; }
 
 ## 4. 多核分工
 
-### 4.1 行分配公式
+### 4.1 batch 分配公式
 
-**与 `simulator/tiling.py::plan_tiling` 完全一致**，host 侧不实现第二份
+**与 `simulator/tiling.py::plan_tiling` 完全一致**，`run_kernel` 侧不实现第二份
 （理由见 `02` §1）：
 
 ```
-total_rows = B * M
-cursor = 0
+cursor = 0                                     # 已分配的 batch 数
 for core_id in 0 .. num_cores-1:
     remaining_cores = num_cores - core_id
-    remaining_rows  = total_rows - cursor
-    if remaining_rows <= 0:
-        row_start = row_end = cursor          // 空任务
+    remaining_batch = B - cursor
+    if remaining_batch <= 0:
+        row_start = row_end = cursor * M       # 空任务
     else:
-        take = min(ceil_div(remaining_rows, remaining_cores), remaining_rows)
-        row_start = cursor
-        row_end   = cursor + take
-        cursor    = row_end
+        take = min(ceil_div(remaining_batch, remaining_cores), remaining_batch)
+        row_start = cursor * M
+        cursor   += take
+        row_end   = cursor * M                 # 恒为 M 的整数倍
 ```
 
-kernel 侧用 `AscendC::GetBlockNum()` 取 `num_cores`、`AscendC::GetBlockIdx()`
+**分配粒度是整个 batch**：一个核至少负责一整个 batch，故 `y[b]` 只被一个核写。
+这带来一个已知代价：**活跃核数上限为 `min(B, 核数)`**，`B=1` 时无论 M 多大都
+只有 1 个核工作。完整决策、量化依据与将来的优化出口见
+[`05_decision_batch_aligned.md`](05_decision_batch_aligned.md)。
+
+device kernel 侧用 `AscendC::GetBlockNum()` 取核数、`AscendC::GetBlockIdx()`
 取 `core_id`（签名依据：`basic_api/kernel_operator_sys_var_intf.h:39/41`，
 均返回 `int64_t`）。
 
@@ -302,11 +306,13 @@ batch 边界**和** `baseM` tile 边界，两者的切分互不对齐。
 - 若重叠 → 需要 GM 上先清零 + 原子加，或改写为 workspace 上按核分区存储、
   另起一个归约步骤
 
-**待确认 `OQ-006`**：跨核相加 `y[b]` 如何完成 —— 不同核对同一个 `y[b]` 的贡献
-必须相加，而一个 batch 可能被多个核覆盖。倾向方案：
-host 侧在 tiling 时把行区间调整为 **batch 对齐**（每个 batch 的行区间不跨核），
-从而彻底消除跨核相加。代价是负载可能略不均衡，但换取实现简单与正确性。
-**该取舍需在写 tiling 之前决定**，因为它同时影响 `run_kernel` 与 device kernel。
+**`OQ-006` 已解决**：跨核相加 `y[b]` 的问题**从结构上消除**——行分配改为
+**batch 对齐切分**，每个 `y[b]` 只被一个核写，因而不需要原子加、不需要
+预先清零。代价经实测量化几乎为零。完整决策过程、量化数据与实施影响见
+[`05_decision_batch_aligned.md`](05_decision_batch_aligned.md)。
+
+本节下方关于"每核把自己负责的每个 batch 的完整和写出"的描述即为该决策的
+结果；`OQ-005`（UB 向 GM 写单个 float 的方式）因此变得简单。
 
 ---
 
@@ -382,7 +388,7 @@ python3 -m judge.runner compare --cases cases_out --results <结果目录>
 | `OQ-003` | §2.2 | UB 输出路径的 C format（ND 还是 NZ） |
 | `OQ-004` | §3.3 | `ReduceSum` 的 pattern 版是否接受 `{n, 1}` 形状 |
 | `OQ-005` | §6 | 从 UB 向 GM 写单个 float 的推荐方式 |
-| `OQ-006` | §6 | 跨核相加 `y[b]` 如何完成（倾向改为 batch 对齐切分） |
+| `OQ-006` | §6 | ~~跨核相加 `y[b]`~~ **已解决**，见 `05` |
 | `OQ-007` | §3.1 | 不传 `sharedTmpBuffer` 的 `ReduceMax` 重载，框架自动申请的临时空间是否足够 |
 
 ---

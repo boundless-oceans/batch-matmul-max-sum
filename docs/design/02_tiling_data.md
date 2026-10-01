@@ -290,22 +290,26 @@ Cube 直写 UB（`04` §2.1），不落 GM。若首次提交出现 workspace 相
 | `sim_dtype` | 不适用——真实 Cube 无此可选项 ✅ |
 | `SimStats.*` | 仅用于估算开销，不进 TilingData ✅ |
 
-**行分配公式**（host 侧不实现、kernel 侧实现，与 `simulator/tiling.py` 一致）：
+**batch 分配公式**（`run_kernel` 侧不实现、device kernel 侧实现，
+与 `simulator/tiling.py::plan_tiling` 一致）：
 
 ```
-total_rows = B * M
-cursor = 0
+cursor = 0                                     # 已分配的 batch 数
 for core_id in 0 .. num_cores-1:
     remaining_cores = num_cores - core_id
-    remaining_rows  = total_rows - cursor
-    if remaining_rows <= 0:
-        row_start = row_end = cursor          # 空任务
+    remaining_batch = B - cursor
+    if remaining_batch <= 0:
+        row_start = row_end = cursor * M       # 空任务
     else:
-        take = min(ceil_div(remaining_rows, remaining_cores), remaining_rows)
-        row_start = cursor
-        row_end   = cursor + take
-        cursor    = row_end
+        take = min(ceil_div(remaining_batch, remaining_cores), remaining_batch)
+        row_start = cursor * M
+        cursor   += take
+        row_end   = cursor * M                 # 恒为 M 的整数倍
 ```
+
+**分配粒度是整个 batch**，而非单个 `baseM` 块或单行。原因是 `y[b]` 必须只被
+一个核写（否则需要跨核相加）。**不变量**：每个核的行区间两端都是 `M` 的整数倍。
+完整决策过程见 [`05_decision_batch_aligned.md`](05_decision_batch_aligned.md)。
 
 **待确认 L**：该公式需要一份**跨语言一致性的验证手段**。计划在阶段 4 用
 `simulator` 生成一组 `(B, M, num_cores) → 各核行区间` 的测试向量并落盘，
@@ -328,7 +332,7 @@ kernel 侧（或一个可在 CPU 上编译的等价函数）用同一批向量�
 | `I` | §3.4 | `TCubeTiling` 是普通 struct 还是 TilingData 类 |
 | `J` | §3.3 | 字段用 `int32_t` 还是 `uint32_t` |
 | `K` | §4.1 | `baseM=baseN=128` 的 UB 占用能否支持双缓冲 |
-| `L` | §6 | 行分配公式的跨语言一致性验证手段 |
+| `L` | §6 | batch 分配公式的跨语言一致性验证手段 |
 | `OQ-013` | §5.1 | host 侧 tiling API 能否在 Ascend 编译单元内使用（**优先级最高**） |
 | `OQ-015` | §3.1 | `TCubeTiling` 的定义来自哪个头文件 |
 | `OQ-016` | §3.2 | 结构体按值传递是否显著增加 launch 开销 |

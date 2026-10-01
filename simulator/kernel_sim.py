@@ -172,24 +172,40 @@ def simulate_case(case: dict, **kwargs) -> np.ndarray:
 
 
 def rows_covered_once(plan: TilingPlan) -> tuple[bool, str]:
-    """校验每个 (b, m) 行被恰好一个核覆盖 —— 不重不漏。
+    """校验切分方案的**两条不变量**。
 
-    kernel 侧没有这个校验，但切分算错会导致某些行被算两次、某些行没人算，
-    输出会静默出错。模拟器上必须先证明切分本身是对的。
+    1. 每个 ``(b, m)`` 行被**恰好一个**核覆盖 —— 不重不漏。
+       kernel 侧没有这个校验，但切分算错会导致某些行被算两次、某些行没人算，
+       输出会静默出错。
+    2. 每个 ``y[b]`` 只被**一个**核写 —— 即同一 batch 的所有行都在同一个核上。
+       这是避免跨核相加的前提；若被违反，输出需要原子操作才正确，而本设计
+       刻意不引入原子操作。
     """
     seen = np.zeros(plan.total_rows, dtype=np.int32)
     for work in plan.works:
         for r in work.rows():
             seen[r] += 1
 
+    problems = []
     missing = np.flatnonzero(seen == 0)
     dup = np.flatnonzero(seen > 1)
-    if missing.size == 0 and dup.size == 0:
-        return True, f"全部 {plan.total_rows} 行各被覆盖 1 次"
-
-    problems = []
     if missing.size:
         problems.append(f"{missing.size} 行无人覆盖，前几个: {missing[:5].tolist()}")
     if dup.size:
         problems.append(f"{dup.size} 行被重复覆盖，前几个: {dup[:5].tolist()}")
+
+    # 不变量 2：每个 batch 必须恰好被一个核覆盖
+    cov = plan.rows_per_batch()
+    multi = [b for b, c in enumerate(cov) if c > 1]
+    zero = [b for b, c in enumerate(cov) if c == 0]
+    if multi:
+        problems.append(f"{len(multi)} 个 batch 被多个核覆盖（会引出跨核相加）: {multi[:5]}")
+    if zero:
+        problems.append(f"{len(zero)} 个 batch 无人覆盖: {zero[:5]}")
+
+    if not problems:
+        return True, (
+            f"全部 {plan.total_rows} 行各被覆盖 1 次；"
+            f"{plan.B} 个 batch 各只被 1 个核写"
+        )
     return False, "; ".join(problems)

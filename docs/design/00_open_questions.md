@@ -54,8 +54,9 @@
 | `OQ-003` | `04` §2.2 | Cube 输出到 UB（VECIN）时 C 的 format 是 ND 还是 NZ | 上服务器后第一步验证（最小用例）；失败则执行 §2.3 的 GM 回退方案 | 阶段 6 |
 | `OQ-004` | `04` §3.3 | `ReduceSum` 的 pattern 版是否接受第二维为 1 的形状 `{n, 1}` | 若不被接受，改用基础 API `ReduceSum` 整体归约成标量 | 阶段 4 / 6 |
 | `OQ-005` | `04` §6 | 从 UB 向 GM 写单个 float 的推荐方式 | 当前设计为先在 UB 内整理成连续块再一次性写出 | 阶段 4 / 6 |
-| `OQ-006` | `04` §6 | 跨核相加 `y[b]` 如何完成 | 倾向改为 batch 对齐切分以消除跨核相加；该取舍需在阶段 3 定 tiling 时决定 | 阶段 3 |
 | `OQ-007` | `04` §3.1 | 不传 `sharedTmpBuffer` 的 `ReduceMax` 重载，框架自动申请的临时空间是否足够 | 若不足则改用手动版本并调用 `GetReduceMaxMaxMinTmpSize` | 阶段 4 / 6 |
+| `OQ-019` | `05` §5.1 | 任务数少于核数时 `blockNum` 取 `min(availableCoreNum, total_tiles)` 还是仍用 `availableCoreNum` 让空闲核自行跳过 | 倾向后者（空闲核直接返回），实现更简单 | 阶段 6 |
+| `OQ-018` | `05` §2 | 方案 A 下 `y[b]` 的预先清零在哪做 | 仅在回到方案 A 时才需要（条件见 `05` §6）。候选 `run_kernel` 内 `aclrtMemset` 或 device 侧先清零再同步 | 暂缓 |
 | `OQ-009` | `platform` §7 | 模板注释用 `__global__ __cube__`，而 devkit 直调示例全用 `__global__ __vector__` | 优先按模板给的 `__cube__` 写；编译报错则改 `__vector__` | 阶段 6 |
 | `OQ-012` | `platform` §7 | 平台是否为 15 个用例各自独立编译 | 影响 dtype 分派策略与编译耗时；由首次提交的耗时推断 | 阶段 6 |
 | `OQ-013` | `02` §5.1 | `run_kernel` 所在的 `kernel.asc` 由带 `--npu-arch` 的 Ascend 编译器处理，host 侧的 `platform_ascendc` 与 `MultiCoreMatmulTiling` 能否在同一编译单元内正常使用，无 Matmul 直调实例可佐证。**优先级最高**——它决定 tiling 参数是算出来的还是推导出来的 | 首次提交时验证；不可行则自行推导 `TCubeTiling` 各字段 | 阶段 6 |
@@ -96,6 +97,7 @@
 | `OQ-008`：提交时哪些文件可改 | **可以**——平台上既能创建文件也能修改文件后提交，工程结构（`CMakeLists.txt` 等）可调。但评测时会替换 `main.asc` 与输入数据，故主要逻辑仍应集中在 `kernel.asc`，其余工程文件的作用是本地自测 | `platform` §7 |
 | `A`–`E`、`G`、`H` 共 7 项：`DataType({...})` 多 dtype 语义、`GetAttrPointer<bool>` 模板参数、`OPS_CHECK_NULL_WITH_CONTEXT` 头文件、`GetStorageShape` vs `GetOriginShape`、`OP_LOGE` 可用性、`Follow` 声明式 dtype 约束、TilingKey 共用 TilingData | **因直调模式而整体作废**——这些全是自定义算子工程框架特有的 API 或机制，直调下不存在（平台负责算子原型与形状/类型推导，transpose 为函数参数，无 TilingKey、无框架上下文）。其中错误上报一项由 `OQ-014` 取代 | `01` §1.1 |
 | `OQ-011`：`availableCoreNum` 与 kernel 内 `GetBlockNum()` 的关系 | **同源**。官方直调示例 `gather.asc:54-63` 用 `PlatformAscendCManager::GetInstance()` 取 `GetCoreNumAiv()` 作为 block 数，与模板中 `main.asc` 经 `aclrtGetDeviceInfo(ACL_DEV_ATTR_CUBE_CORE_NUM)` 取得的值来源一致。故可直接用 `availableCoreNum` 作 block 数 | `platform` §3.3 |
+| `OQ-006`：跨核相加 `y[b]` 如何完成 | **已解决**——决策为改为 batch 对齐切分，使每个 `y[b]` 只被一个核写，跨核相加问题从结构上消失。代价经实测量化几乎为零：12 个用例中 10 个的 `M ≤ 128`（仅 1 个 M-tile），那些用例在两种方案下都是单核；真正有差异的仅 `large_square`（6→8，变好）与 `m_large_n_small`（11→16，略降）。详见 `05_decision_batch_aligned.md` | `05` |
 
 ---
 
@@ -105,8 +107,7 @@
 
 | 限制 | 原因 | 出处 |
 | :--- | :--- | :--- |
-| 只沿 (B, M) 切核，不切 N | `Max(N)` 与 `Sum(M)` 不可交换；跨核切 N 需 workspace 二次归约且无法与计算重叠 | `simulator/tiling.py`（实现）、`02` §1（理由） |
-| `b1_min` 等小规模用例只有 1 个核工作 | 同上；这类用例本身极快，优化收益有限 | `simulator/kernel_sim.py`（统计）、`02` §6（切分公式） |
+| **活跃核数上限为 `min(B, 核数)`** | 两条约束叠加的后果：不切 N 使每行的完整 N 须同核；`y[b]` 只被一个核写又使同一 batch 的 M 行须同核。故一个核至少负责一整个 batch。`B=1` 时无论 M 多大都只有 1 个核工作。**这是本设计的已知代价**，实测其影响集中在 `large_square` 一个用例（4 核 vs 20 核），其余用例总 MAC 数在 1e5–1e7 量级、属启动开销主导 | `05` §3、§6 |
 | 行区间会跨越 batch 边界 | 每行独立成任务，不做 batch 对齐；kernel 输出须按 batch 分流 | `02` §6 |
 | 本地无法编译或运行 Ascend C 代码 | 无 CANN toolkit 与 NPU，只能到 CANNLab 验证 | 项目约束 |
 | 测试集对 bfloat16 的覆盖是间接的 | numpy 无原生 bf16，用例以 float32 承载数值、按 bf16 容差判定 | `judge/cases.py` |

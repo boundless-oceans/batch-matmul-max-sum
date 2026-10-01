@@ -127,11 +127,15 @@ def test_rows_covered_exactly_once(B: int, M: int, cores: int):
     assert ok, msg
 
 
-def test_cores_exceeding_rows_produce_empty_work():
-    """核数多于行数时，多余核分到空任务而不是重复计算。"""
+def test_cores_exceeding_batches_produce_empty_work():
+    """核数多于 batch 数时，多余核分到空任务而不是重复计算。
+
+    分配粒度是**整个 batch**，故 `B=1` 时只有 1 个核有活干，其余 7 个为空。
+    """
     plan = plan_tiling(B=1, M=2, N=32, K=32, num_cores=8, base_m=16, base_n=16)
     empty = [w for w in plan.works if w.num_rows == 0]
-    assert len(empty) == 6, f"应有 6 个空任务，实际 {len(empty)}"
+    assert len(empty) == 7, f"应有 7 个空任务，实际 {len(empty)}"
+    assert plan.active_cores() == 1
     ok, msg = rows_covered_once(plan)
     assert ok, msg
 
@@ -148,19 +152,55 @@ def test_single_row_single_core_case():
 # ------------------------------------------------- 标准 4: 负载分配
 
 
-def test_load_balance_is_tight():
-    """行数能被核数整除时，负载必须完全均衡。"""
+def test_load_balance_is_tight_when_batches_divide_evenly():
+    """batch 数能被核数整除时，负载完全均衡（每核拿到相同的 batch 数）。"""
     plan = plan_tiling(B=4, M=32, N=64, K=64, num_cores=8, base_m=16, base_n=16)
     hi, lo, imb = plan.load_balance()
-    assert hi == lo == 16, f"预期每核 16 行，实际 {hi}/{lo}"
+    # 8 核分 4 个 batch：4 个核各拿 1 个（32 行），另 4 个为空
+    assert hi == lo == 32, f"预期每核 32 行，实际 {hi}/{lo}"
     assert imb == 0.0
+    assert plan.active_cores() == 4
 
 
-def test_load_balance_differs_by_at_most_one_row_when_not_divisible():
-    """行数除不尽时，各核行数差最多 1。"""
-    plan = plan_tiling(B=1, M=17, N=64, K=64, num_cores=5, base_m=16, base_n=16)
+def test_load_balance_bounded_by_batch_size():
+    """batch 数除不尽核数时，行数差的上界是**一个 batch 的行数**（即 M），
+
+    而不是按行分配时的 1 行——因为分配粒度是整个 batch。
+    """
+    plan = plan_tiling(B=3, M=17, N=64, K=64, num_cores=2, base_m=16, base_n=16)
     hi, lo, _ = plan.load_balance()
-    assert hi - lo <= 1, f"行数差 {hi - lo} 超过 1"
+    assert hi - lo <= 17, f"行数差 {hi - lo} 超过一个 batch 的 17 行"
+    # 2 核分 3 个 batch：一个拿 2 个（34 行），一个拿 1 个（17 行）
+    assert (hi, lo) == (34, 17)
+
+
+def test_no_batch_spans_multiple_cores():
+    """**本设计的核心不变量**：同一 batch 的所有行必须落在同一个核上。
+
+    否则 `y[b]` 会被多个核写，需要原子操作才正确。对多种 (B, M, 核数) 组合
+    逐一验证 `rows_per_batch()` 恒为 1。
+    """
+    combos = [
+        (1, 1, 20), (1, 17, 20), (1, 8192, 20),
+        (2, 33, 20), (3, 32, 20), (4, 1024, 20),
+        (7, 64, 3), (64, 8, 20), (64, 8, 64), (64, 8, 100),
+        (2, 2048, 20), (1, 16, 40),
+    ]
+    for B, M, cores in combos:
+        plan = plan_tiling(B=B, M=M, N=32, K=32, num_cores=cores, base_m=128, base_n=128)
+        cov = plan.rows_per_batch()
+        assert len(cov) == B
+        assert max(cov) == 1, f"B={B}, M={M}, cores={cores}: 有 batch 被 {max(cov)} 个核覆盖"
+        assert min(cov) == 1, f"B={B}, M={M}, cores={cores}: 有 batch 无人覆盖"
+        ok, msg = rows_covered_once(plan)
+        assert ok, f"B={B}, M={M}, cores={cores}: {msg}"
+
+
+def test_active_cores_capped_by_batch_count():
+    """活跃核数的上限是 batch 数，不是核数——这是本设计的已知代价。"""
+    for B, cores in [(1, 20), (2, 20), (4, 20), (8, 20), (64, 20)]:
+        plan = plan_tiling(B=B, M=64, N=64, K=64, num_cores=cores, base_m=16, base_n=16)
+        assert plan.active_cores() == min(B, cores), f"B={B}: 活跃核数 {plan.active_cores()}"
 
 
 def test_describe_plan_renders():

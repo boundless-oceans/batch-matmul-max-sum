@@ -1,15 +1,20 @@
 """kernel 侧的 tiling 规划 —— 把问题切成"每个核干什么"。
 
 本模块是 **Ascend C kernel 切分逻辑的 numpy 等价物**：这里定下的规则，
-`src/op_kernel/` 与 `src/op_host/` 必须逐条对应，否则模拟器验证过的东西
-在 NPU 上不成立。
+`submit/kernel.asc` 里的 host 与 device 代码必须逐条对应，否则模拟器验证过
+的东西在 NPU 上不成立。
 
 两条硬约束决定了切分方式:
 
 1. **不跨核切 N。** 赛题规定归约顺序为 `Max(N) -> Sum(M)`，两者不可交换:
-   每个 (b, m) 行必须看到完整的 N 才能取最大值。若沿 N 切核，各核只能算出
+   每行的 MaxSim 必须看到完整的 N 才能取最大值。若沿 N 切核，各核只能算出
    部分最大值，跨核合并需要 workspace 二次归约与同步，且无法与计算重叠。
-2. **每个核处理的每个 (b, m) 行都必须把完整 N 走完**，再进入下一行。
+2. **同一 batch 的 M 行必须落在同一个核上。** 因为 `y[b] = sum_m R[b,m]`，
+   若一个 batch 的 M 行分散到多个核，各核只能算出部分和，跨核相加需要
+   原子操作与预先清零。把整个 batch 交给一个核，`y[b]` 就只被一个核写。
+
+两条约束叠加的后果是 **并行度上限为 B**（batch 数），而不是核数。
+详见 `docs/design/05_decision_batch_aligned.md`。
 """
 
 from __future__ import annotations
@@ -36,10 +41,14 @@ class CoreWork:
 
     ``row_start`` 与 ``row_end`` 是在**全局行号空间**（batch 优先展平后的
     ``b * M + m``）上的半开区间 ``[row_start, row_end)``。
-    因为每行都需要完整 N，任务天然以行为单位分配，不需要再切 N。
 
-    区间可能跨越 batch 边界，这是允许的: 同一核内顺序处理即可，
-    输出 y 的累加也按 batch 分别进行（见 kernel_sim）。
+    **核心不变量**：区间要么为空，要么**完整覆盖若干个连续的 batch**——
+    即 ``row_start`` 与 ``row_end`` 都是 ``M`` 的整数倍。这保证同一 batch 的
+    所有 M 行都在同一个核上，因而每个 ``y[b]`` 只被一个核写。
+    该不变量由 :func:`plan_tiling` 保证，并由 :func:`rows_covered_once` 校验。
+
+    本类**不携带 M**（避免与 plan 的冗余）；需要 batch 编号时用
+    :meth:`TilingPlan.work_batches`。
     """
 
     core_id: int
@@ -52,6 +61,9 @@ class CoreWork:
 
     def rows(self) -> range:
         return range(self.row_start, self.row_end)
+
+
+# ---------------------------------------------------------------- 计划
 
 
 @dataclass(frozen=True)
@@ -71,21 +83,28 @@ class TilingPlan:
     def total_rows(self) -> int:
         return self.B * self.M
 
+    def work_batches(self, work: CoreWork) -> range:
+        """某个核负责的 batch 编号范围。"""
+        if work.num_rows == 0:
+            return range(0)
+        return range(work.row_start // self.M, work.row_end // self.M)
+
     def rows_per_batch(self) -> list[int]:
-        """每个 batch 被多少个核覆盖 —— 用于估算 batch 维的并行度上限。"""
+        """每个 batch 被多少个核覆盖。**必须恒为 1**（`plan_tiling` 的不变量）。"""
         counts = [0] * self.B
         for w in self.works:
-            b_start = w.row_start // self.M
-            b_end = (w.row_end - 1) // self.M if w.row_end > w.row_start else b_start
-            for b in range(b_start, min(b_end + 1, self.B)):
-                counts[b] += 1
+            for b in self.work_batches(w):
+                if 0 <= b < self.B:
+                    counts[b] += 1
         return counts
 
     def load_balance(self) -> tuple[int, int, float]:
         """返回 (最大行数, 最小行数, 不均衡度)。
 
         不均衡度 = (最大 - 最小) / 平均，0 表示完全均衡。
-        这是性能调优时要盯的指标。
+
+        注意：分配粒度是"整个 batch"，故不均衡度的下界受单个 batch 的行数
+        （即 `M`）限制，**不能**像按行分配那样保证差 ≤ 1 行。
         """
         active = [w.num_rows for w in self.works if w.num_rows > 0]
         if not active:
@@ -93,6 +112,10 @@ class TilingPlan:
         lo, hi = min(active), max(active)
         mean = sum(active) / len(active)
         return (hi, lo, (hi - lo) / mean if mean else 0.0)
+
+    def active_cores(self) -> int:
+        """实际有工作的核数。上限受 `B` 约束。"""
+        return sum(1 for w in self.works if w.num_rows > 0)
 
 
 # ---------------------------------------------------------------- 规划
@@ -107,20 +130,21 @@ def plan_tiling(
     base_m: int = 128,
     base_n: int = 128,
 ) -> TilingPlan:
-    """按 (B, M) 展平后的行空间均分工作，**不切 N**。
+    """把 **B 个 batch** 均分给各核；每个核独占它拿到的 batch 的全部 M 行。
 
     参数
     ----
     num_cores
-        可用 AI Core 数（自行调研得到，kernel 侧对应 ``GetBlockNum()``）。
+        可用 AI Core 数（`run_kernel` 侧为 `availableCoreNum`，
+        device kernel 内对应 ``GetBlockNum()``）。
     base_m, base_n
-        Cube 单次计算的分块尺寸。允许取非对齐值，用于逼出尾块路径。
+        Cube 单次计算的分块尺寸，供 device 侧决定 tile 循环；**不参与切分**
+        （切分粒度是整个 batch）。允许取非对齐值以逼出尾块路径。
 
-    分配策略：从前往后逐核分配，每核取「剩余行数 / 剩余核数」向上取整，
-    因此任意两核的行数差最多 1。整批(batch)边界不做对齐处理——每行独立成任务，
-    跨 batch 的行区间在同一核内顺序处理即可（kernel 侧输出需按 batch 分流）。
+    分配策略：从前往后逐核分配，每核取「剩余 batch 数 / 剩余核数」向上取整，
+    故任意两核的 batch 数差 ≤ 1。若 batch 数少于核数，多余核分到空任务。
 
-    本函数是**行分配规则的唯一实现**，kernel_sim 直接复用它，避免两处逻辑漂移。
+    本函数是**分配规则的唯一实现**，kernel_sim 直接复用它，避免两处逻辑漂移。
     """
     if B <= 0 or M <= 0 or N <= 0 or K <= 0:
         raise ValueError(f"维度必须为正，实际 B={B}, M={M}, N={N}, K={K}")
@@ -129,21 +153,24 @@ def plan_tiling(
     if base_m <= 0 or base_n <= 0:
         raise ValueError(f"base_m/base_n 必须为正，实际 {base_m}, {base_n}")
 
-    total_rows = B * M
     works: list[CoreWork] = []
-    cursor = 0
+    cursor_batch = 0
     for core_id in range(num_cores):
         remaining_cores = num_cores - core_id
-        remaining_rows = total_rows - cursor
-        if remaining_rows <= 0:
-            # 核数多于行数：多余核分到空任务，不重复计算
-            works.append(CoreWork(core_id=core_id, row_start=cursor, row_end=cursor))
+        remaining_batches = B - cursor_batch
+        if remaining_batches <= 0:
+            # batch 数少于核数：多余核分空任务
+            end_row = cursor_batch * M
+            works.append(CoreWork(core_id=core_id, row_start=end_row, row_end=end_row))
             continue
-        take = min(ceil_div(remaining_rows, remaining_cores), remaining_rows)
-        works.append(CoreWork(core_id=core_id, row_start=cursor, row_end=cursor + take))
-        cursor += take
+        take = min(ceil_div(remaining_batches, remaining_cores), remaining_batches)
+        row_start = cursor_batch * M
+        cursor_batch += take
+        works.append(
+            CoreWork(core_id=core_id, row_start=row_start, row_end=cursor_batch * M)
+        )
 
-    assert cursor == total_rows, f"行分配未覆盖全部行：{cursor} != {total_rows}"
+    assert cursor_batch == B, f"batch 分配未覆盖全部 batch：{cursor_batch} != {B}"
 
     return TilingPlan(
         B=B, M=M, N=N, K=K,
@@ -168,37 +195,36 @@ def num_m_tiles(row_count: int, base_m: int) -> int:
 
 
 def describe_plan(plan: TilingPlan) -> str:
-    """把切分方案渲染成表格，用于肉眼核对负载是否均衡。"""
+    """把切分方案渲染成表格，用于肉眼核对负载与不变量。"""
     lines = [
         f"问题: B={plan.B} M={plan.M} N={plan.N} K={plan.K}  "
         f"(总行数 B*M={plan.total_rows})",
-        f"切分: baseM={plan.base_m} baseN={plan.base_n} "
-        f"N方向tile数={num_n_tiles(plan)} 核数={plan.num_cores}",
+        f"切分: 粒度=整个 batch（保证同一 batch 不跨核）  "
+        f"baseM={plan.base_m} baseN={plan.base_n} 核数={plan.num_cores}",
         "",
-        f"{'core':>4} {'rows':>14} {'行数':>5} {'M-tiles':>8}  覆盖的 (b, m) 范围",
+        f"{'core':>4} {'rows':>14} {'行数':>6} {'batch数':>8}  负责的 batch",
         "-" * 68,
     ]
     for w in plan.works:
         if w.num_rows == 0:
-            lines.append(f"{w.core_id:>4} {'(空)':>14} {0:>5} {0:>8}  —")
+            lines.append(f"{w.core_id:>4} {'(空)':>14} {0:>6} {0:>8}  —")
             continue
-        b_start, m_start = divmod(w.row_start, plan.M)
-        b_end, m_end = divmod(w.row_end - 1, plan.M)
-        span = (
-            f"b{b_start}[m{m_start}:{plan.M}] .. b{b_end}[m0:{m_end + 1}]"
-            if b_start != b_end
-            else f"b{b_start}[m{m_start}:{m_end + 1}]"
-        )
+        bs = list(plan.work_batches(w))
+        span = f"b{bs[0]}..b{bs[-1]}" if len(bs) > 1 else f"b{bs[0]}"
         lines.append(
             f"{w.core_id:>4} {f'[{w.row_start},{w.row_end})':>14} "
-            f"{w.num_rows:>5} {num_m_tiles(w.num_rows, plan.base_m):>8}  {span}"
+            f"{w.num_rows:>6} {len(bs):>8}  {span}"
         )
 
     hi, lo, imb = plan.load_balance()
+    cov = plan.rows_per_batch()
     lines += [
         "",
         f"负载: 最多 {hi} 行 / 最少 {lo} 行 / 不均衡度 {imb:.4f}"
         f"{'（完全均衡）' if imb == 0 else ''}",
-        f"batch 维并行度: 每 batch 覆盖核数 {plan.rows_per_batch()}",
+        f"每 batch 覆盖核数: {cov[:8]}{'...' if plan.B > 8 else ''}"
+        f"  最大={max(cov) if cov else 0}（必须为 1）",
+        f"并行度: 活跃核 {plan.active_cores()} / {plan.num_cores}"
+        f"（上限受 B={plan.B} 约束）",
     ]
     return "\n".join(lines)
