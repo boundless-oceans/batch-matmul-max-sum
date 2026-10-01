@@ -19,6 +19,17 @@
 | `GlobalTensor::SetValue` 逐个标量写 GM | 有编译风险（该接口声明与实现签名不一致） |
 | `TPosition::VECOUT` 拿不准 | 已核对：有效，且 `QuePosition` 是其别名 |
 
+## 目标 CANN 版本
+
+平台题目信息栏标注 **`CANN: 9.0.0`**，而本台账的核对基准是 devkit
+**v9.1.0-beta.2**。为消除版本疑虑，已用 `git show v9.0.0:<path>` 对 **v9.0.0
+标签**逐项复核，结论：**本表所有条目在 v9.0.0 下同样存在且签名一致**。
+
+另有一条重要的路径澄清：源码仓库里 `tiling_api.h` 等头文件的**物理位置**
+在 9.0.0（`include/adv_api/`）与 9.1（`include/tiling/`）之间不同，但官方示例的
+**`#include` 写法两版完全相同**（如 `#include "tiling/tiling_api.h"`），
+因为那是构建系统解析的逻辑路径。**按示例的写法即可，勿按仓库物理路径改写。**
+
 ## 核对方法
 
 1. 从 `kernel.asc` **机械抽取**所有外部调用（正则），避免凭印象漏项
@@ -59,6 +70,25 @@
 | `SetGlobalBuffer` | `void SetGlobalBuffer(__gm__ PrimType*, uint64_t)` | `basic_api/kernel_tensor.h:265` | ✅ |
 | `LocalTensor::SetValue` | `void SetValue(const uint64_t offset, PrimType value)` | `basic_api/kernel_tensor.h:276` | ✅ |
 | `GlobalTensor::SetValue` | 头文件 `uint32_t index` + `S`，impl `uint64_t offset` + `PrimType` | `kernel_tensor.h:165` vs `kernel_tensor_impl.h:1549` | ⚠️ **声明与实现不一致，避免使用** |
+
+### kernel 限定符与跨核同步（**关键**）
+
+| API / 关键字 | 形态 | 出处 | 结论 |
+| :--- | :--- | :--- | :--- |
+| 纯 Cube kernel | `__global__ __aicore__` | `examples/.../02_matrix/matmul/matmul.asc:102` | ✅ 官方 Matmul 示例用法 |
+| 纯 Vector kernel | `__global__ __vector__` | 202 处示例 | ✅ |
+| **Cube+Vector 混合** | `extern "C" __global__ __mix__(1, 2) void` | `examples/.../00_matrix/bare_mix/bare_mix.asc:289` | ✅ **本算子用这个** |
+| `__mix__` 参数 | `__mix__(1, 2)` 最多（8 处），另有 `(0,1)`、`(1,1)` | 样例统计 | 两个数字为 Cube/Vector 核配比 |
+| `ASCEND_IS_AIC` | `(g_coreType == AscendC::AIC)`，**编译期常量** | `impl/utils/sys_macros.h:68` | ✅ |
+| `ASCEND_IS_AIV` | `(g_coreType == AscendC::AIV)`，**编译期常量** | `impl/utils/sys_macros.h:67` | ✅ |
+| `CrossCoreSetFlag` | `template<uint8_t modeId, pipe_t pipe> void CrossCoreSetFlag(uint16_t flagId)` | `basic_api/kernel_operator_block_sync_intf.h:244` | ✅ 官方示例 `CrossCoreSetFlag<0x2, PIPE_FIX>(3)` |
+| `CrossCoreWaitFlag` | 同上形态 | 同上 | ✅ 官方示例 `CrossCoreWaitFlag(3)` |
+| `ASCENDC_CUBE_ONLY` | 宏，指定 Matmul 只在 AIC 核运行 | `bare_mix.asc:12` | ✅ |
+| `REGIST_MATMUL_OBJ` | `REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), mmObj, &tiling)` | 1 个文件 | ✅ 待确认是否必需（`OQ-022`） |
+
+> ⚠️ **模板注释的 `__cube__` 对本算子是错的。** 本算子必须在 AIV 上做归约，
+> 而 `__cube__` 是纯 Cube kernel。正确写法是 `__mix__(1, 2)` + `ASCEND_IS_AIC`/
+> `ASCEND_IS_AIV` 隔离 + 跨核同步。详见 `04` §0。
 
 ### tiling API（host 侧）
 

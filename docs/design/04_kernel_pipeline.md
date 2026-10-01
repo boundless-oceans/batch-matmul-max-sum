@@ -7,6 +7,9 @@
 > 影响**——它属算法层面，与是否算子工程无关。改动集中在平台相关表述：
 > 核数来源、tiling 传递、验证流程。
 
+> ⚠️ **§0 是后续补充的关键更正**，它改变了 kernel 的骨架（限定符与核间同步）。
+> 先读 §0 再读其余各节。
+
 前置依据：
 - [`01_operator_interface.md`](01_operator_interface.md) —— `run_kernel` 契约与 dtype/transpose 分派
 - [`02_tiling_data.md`](02_tiling_data.md) —— tiling 结构字段与行分配公式
@@ -14,6 +17,66 @@
 - [`../platform/00_platform_mechanics.md`](../platform/00_platform_mechanics.md) —— 平台机制与构建方式
 - [`simulator/tiling.py`](../../simulator/tiling.py) —— 切分规则的已实现版本
 - [`00_open_questions.md`](00_open_questions.md) —— 待确认事项登记册
+
+---
+
+## 0. kernel 骨架：`__mix__` 与 AIC/AIV 分工（关键更正）
+
+### 0.1 更正内容
+
+早期版本按平台模板注释写成 `__global__ __cube__` 的单核 kernel。
+**该写法对本算子是错的**——`__cube__` 是纯 Cube kernel，而本算子必须在
+**Cube 核上做 Matmul、在 Vector 核上做归约**（`ReduceMax`/`ReduceSum` 等
+向量 API 在 AIC 上会直接返回，不执行任何计算）。
+
+依据：CANN 9.0.0 的官方示例
+`examples/01_simd_cpp_api/03_libraries/00_matrix/bare_mix/bare_mix.asc`
+（391 行）——它的结构与本算子**完全同形**：AIC 算 Matmul、AIV 做逐元素向量计算。
+
+### 0.2 正确骨架（依官方示例）
+
+```cpp
+extern "C" __global__ __mix__(1, 2) void batch_matmul_max_sum_custom(...)
+{
+    AscendC::TPipe pipe;           // 在分支之前声明（官方示例即此形态）
+
+    if ASCEND_IS_AIC {
+        /* Matmul 计算 → 回写 → 发同步 flag */
+    }
+    if ASCEND_IS_AIV {
+        /* 逐行归约 → 写回 y */
+    }
+}
+```
+
+四个必要组成（缺一不可）：
+
+| # | 组成 | 说明 |
+| :--- | :--- | :--- |
+| 1 | `__mix__(1, 2)` | 同时启用 AIC 与 AIV。两个数字是 Cube/Vector 核的配比；910B 为 1:2 |
+| 2 | `#define ASCENDC_CUBE_ONLY` | 指定 Matmul 对象只跑在 AIC 核上。**放在 include 之后、Matmul 实例化之前** |
+| 3 | `if ASCEND_IS_AIC` / `if ASCEND_IS_AIV` | 隔离两个核的代码。二者是**编译期常量**（`g_coreType == AscendC::AIC/AIV`，见 `impl/utils/sys_macros.h:67-68`），编译器据此剪掉不属于该核的分支 |
+| 4 | `CrossCoreSetFlag` / `CrossCoreWaitFlag` | **跨核同步，不可省**。AIC 写完数据后发 flag，AIV 等 flag 再读；否则 AIV 会读到未写完的数据 |
+
+署名：`CrossCoreSetFlag<modeId, pipe>(flagId)`，声明见
+`basic_api/kernel_operator_block_sync_intf.h`。官方示例的用法是
+`CrossCoreSetFlag<0x2, PIPE_FIX>(3)`（Matmul 的 `End()` 之后）+ AIV 侧
+`CrossCoreWaitFlag(3)`。
+
+### 0.3 由此引入的新待确认项
+
+**待确认 `OQ-020`**：`__mix__` 的属性顺序。官方两处写法不同——`bare_mix.asc`
+是 `extern "C" __global__ __mix__(1, 2) void`，而
+`docs/api/context/DataStoreBarrier.md` 是 `__mix__(1,2) __global__ __aicore__ void`。
+本设计取前者（那是可编译的工作代码），若报错再换顺序。
+
+**待确认 `OQ-021`**：`CrossCoreSetFlag` 的 `modeId` 与 `flagId` 取值。官方示例用
+`0x2` 与 `3`，但两者的含义未见于文档；需确认能否任意取（只要 Set/Wait 配对）。
+官方示例是目前唯一的依据。
+
+**待确认 `OQ-022`**：本算子是否需要 `REGIST_MATMUL_OBJ` 与 workspace。官方示例用
+`REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), mmObj, &tiling)` 初始化 Matmul
+对象，且需要 workspace。这与 `02` §5.3 的 `OQ-017` 相关。
 
 ---
 
@@ -380,7 +443,9 @@ python3 -m judge.runner compare --cases cases_out --results <结果目录>
 
 ## 8. 待确认事项
 
-本文件涉及 **`OQ-003` 至 `OQ-007`**。完整列表与状态见
+本文件涉及 **`OQ-003` 至 `OQ-007`**，以及 **`OQ-020`**（`__mix__` 属性顺序）、
+**`OQ-021`**（跨核 flag 取值）、**`OQ-022`**（是否需要 `REGIST_MATMUL_OBJ`）。
+完整列表与状态见
 [`00_open_questions.md`](00_open_questions.md)，本节不复制其内容。
 
 | 编号 | 就地位置 | 事项 |
@@ -390,11 +455,15 @@ python3 -m judge.runner compare --cases cases_out --results <结果目录>
 | `OQ-005` | §6 | 从 UB 向 GM 写单个 float 的推荐方式 |
 | `OQ-006` | §6 | ~~跨核相加 `y[b]`~~ **已解决**，见 `05` |
 | `OQ-007` | §3.1 | 不传 `sharedTmpBuffer` 的 `ReduceMax` 重载，框架自动申请的临时空间是否足够 |
+| `OQ-020` | §0.3 | `__mix__` 的属性顺序（官方两处写法不同） |
+| `OQ-021` | §0.3 | `CrossCoreSetFlag` 的 `modeId` / `flagId` 取值 |
+| `OQ-022` | §0.3 | 是否需要 `REGIST_MATMUL_OBJ` 与 workspace |
 
 ---
 
 ## 9. 本文件的验收标准
 
+- [x] kernel 骨架（限定符与核间同步）写明，且有官方同形示例作依据（§0）
 - [x] 流水总览与模拟器逐项对应（§1.1）
 - [x] Cube→Vector 交接方式确定，format 不确定性已登记并给出回退方案（§2）
 - [x] 两级归约的 API、签名与尾块处理写明（§3、§5）

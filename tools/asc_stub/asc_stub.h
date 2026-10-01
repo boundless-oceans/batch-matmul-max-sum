@@ -78,6 +78,17 @@ public:
 // Ascend 的核函数限定符与 kernel launch 语法不是标准 C++，用桩模拟。
 #define __cube__
 #define __vector__
+// __mix__(cubeNum, vectorNum)：Cube+Vector 混合 kernel。
+// 真实定义在编译器内，devkit 里没有（见 v9.0.0 bare_mix.asc 的用法）。
+#define __mix__(cubeNum, vectorNum)
+
+// 核隔离条件。真实定义：impl/utils/sys_macros.h:67-68
+//   #define ASCEND_IS_AIV (g_coreType == AscendC::AIV)
+//   #define ASCEND_IS_AIC (g_coreType == AscendC::AIC)
+// 语法检查时两者都取 true，使 AIC 与 AIV 两条分支的代码都被编译器检查到
+// （真实编译时只有一个分支会保留，另一支被剪掉）。
+#define ASCEND_IS_AIC (true)
+#define ASCEND_IS_AIV (true)
 namespace AscendC {
 // 桩只做参数类型检查，不求值也不真正调用内核函数。
 template <class F, class... Args,

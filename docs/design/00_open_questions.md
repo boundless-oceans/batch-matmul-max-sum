@@ -55,6 +55,9 @@
 | `OQ-005` | `04` §6 | 从 UB 向 GM 写单个 float 的推荐方式 | 当前设计为先在 UB 内整理成连续块再一次性写出 | 阶段 4 / 6 |
 | `OQ-007` | `04` §3.1 | 不传 `sharedTmpBuffer` 的 `ReduceMax` 重载，框架自动申请的临时空间是否足够 | 若不足则改用手动版本并调用 `GetReduceMaxMaxMinTmpSize` | 阶段 4 / 6 |
 | `OQ-019` | `05` §5.1 | 任务数少于核数时 `blockNum` 取 `min(availableCoreNum, total_tiles)` 还是仍用 `availableCoreNum` 让空闲核自行跳过 | 倾向后者（空闲核直接返回），实现更简单 | 阶段 6 |
+| `OQ-020` | `04` §0.3 | `__mix__` 的属性顺序。官方两处写法不同：`bare_mix.asc` 为 `extern "C" __global__ __mix__(1, 2) void`，而 `DataStoreBarrier.md` 为 `__mix__(1,2) __global__ __aicore__ void` | 取前者（可编译的工作代码）；若编译报错再换顺序 | 阶段 6 |
+| `OQ-021` | `04` §0.3 | `CrossCoreSetFlag` 的 `modeId` 与 `flagId` 取值。官方示例用 `0x2` / `3`，含义未见于文档 | 确认能否任意取（只要 Set/Wait 配对）；官方示例是唯一依据 | 阶段 6 |
+| `OQ-022` | `04` §0.3 | 本算子是否需要 `REGIST_MATMUL_OBJ` 与 workspace。官方 bare_mix 示例用 `REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), mmObj, &tiling)` | 与 `OQ-017` 相关；若需要 workspace 则 `02` §5.3 的假设需改 | 阶段 6 |
 | `OQ-018` | `05` §2 | 方案 A 下 `y[b]` 的预先清零在哪做 | 仅在回到方案 A 时才需要（条件见 `05` §6）。候选 `run_kernel` 内 `aclrtMemset` 或 device 侧先清零再同步 | 暂缓 |
 | `OQ-009` | `platform` §7 | 模板注释用 `__global__ __cube__`，而 devkit 直调示例全用 `__global__ __vector__` | 优先按模板给的 `__cube__` 写；编译报错则改 `__vector__` | 阶段 6 |
 | `OQ-012` | `platform` §7 | 平台是否为 15 个用例各自独立编译 | 影响 dtype 分派策略与编译耗时；由首次提交的耗时推断 | 阶段 6 |
