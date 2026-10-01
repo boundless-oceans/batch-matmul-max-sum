@@ -28,6 +28,45 @@
 
 ## 2. `ISTRANS` 的确切语义
 
+### 2.1 `MatmulType` 的完整模板签名
+
+`ISTRANS` 是 `MatmulType` 的**第 4 个模板参数**，故不能写成
+`MatmulType<..., ISTRANS>` 这样的省略形式。完整签名为：
+
+```cpp
+template <TPosition POSITION, CubeFormat FORMAT, typename TYPE,
+          bool ISTRANS = false,
+          LayoutMode LAYOUT = LayoutMode::NONE,
+          bool IBSHARE = false,
+          TPosition SRCPOS = TPosition::GM>
+struct MatmulType {
+    constexpr static TPosition  pos     = POSITION;
+    constexpr static CubeFormat format  = FORMAT;
+    using T                             = TYPE;
+    constexpr static bool       isTrans = ISTRANS;
+    constexpr static LayoutMode layout  = LAYOUT;
+    constexpr static bool       ibShare = IBSHARE;
+    constexpr static TPosition  srcPos  = SRCPOS;
+};
+```
+
+依据：`asc-devkit/impl/adv_api/detail/matmul/utils/matmul_type_def.h:36-47`
+与 CANN 8.2 指南（`devguide82.txt:80448-80457`），**两处完全一致**。
+
+| 参数 | 取值 | 本项目用法 |
+| :--- | :--- | :--- |
+| `POSITION` | `TPosition` | `GM`（A/B 在 GM）、`VECIN`（C） |
+| `FORMAT` | `CubeFormat` | `ND`（C 的 format 存在不确定性，见 `04` §2.2） |
+| `TYPE` | 数据类型 | `half` / `bfloat16_t` / `float` |
+| **`ISTRANS`** | `bool`，默认 `false` | **本文件讨论的对象** |
+| `LAYOUT` | `LayoutMode`，默认 `NONE` | 取默认（不使用 batch matmul 的 layout 机制） |
+| `IBSHARE` | `bool`，默认 `false` | 取默认（不启用 L1 复用） |
+| `SRCPOS` | `TPosition`，默认 `GM` | 取默认 |
+
+> 同文件 `:112` 另有 `MatmulTypeWithScale`（带 scale 的变体），本项目不用。
+
+### 2.2 `ISTRANS` 的语义
+
 依据：调研报告第 2 节，引官方 `Matmul_usage.md` 表 1 原文。
 
 | `ISTRANS` | 语义 |
@@ -38,7 +77,7 @@
 关键点：`ISTRANS = true` 不是"本次一定转置"，而是"**允许**本次转置"。
 真正的开关在运行时的 `SetTensorA/B` 第二个参数。
 
-### 2.1 `ISTRANS = false` 时的硬约束
+### 2.3 `ISTRANS = false` 时的硬约束
 
 官方原文（调研报告第 2 节）：
 
@@ -307,7 +346,7 @@ __aicore__ inline void SetOrgShape(int orgM, int orgN, int orgKa, int orgKb, int
 - [x] 四种组合各自的 A/B 转置需求逐条写明（§3）
 - [x] 四种组合的运行时分派方式写明，并说明其代价（§3.1）
 - [x] `ISTRANS` 的语义及其与 `isTranspose` 的区别写明（§2）
-- [x] `ISTRANS=false` 时强设 `isTranspose=true` 的后果写明（§2.1）
+- [x] `ISTRANS=false` 时强设 `isTranspose=true` 的后果写明（§2.3）
 - [x] 三处一致性规则及其不一致后果写明（§4）
 - [x] `SetOrgShape` 给出具体填法、理由与验证方法（§5）
 - [x] 与其它文档的衔接已更新，作废编号已说明（§6）

@@ -274,6 +274,33 @@ def main() -> int:
             if not target.exists():
                 problems.add(f"{doc.name} 中的链接失效: {m.group(1)}")
 
+    # --- 检查 8: 文档自身的节号引用有效 ---
+    # 改写节号时极易漏改正文里的自引用（本项目已发生一次）。只检查不带
+    # 文档前缀的裸引用（形如 `（§2.1）`、`见 §4`），带前缀的由检查 6 覆盖。
+    for doc in sorted(DESIGN_DIR.glob("0*.md")):
+        if doc.name == REGISTRY.name:
+            continue
+        text = doc.read_text(encoding="utf-8")
+        headings = _headings(text)
+        for m in re.finditer(r"(?<![`0-9])§(\d+(?:\.\d+)?)", text):
+            sec = m.group(1)
+            # 跳过带文档前缀的引用。前缀有三种写法：
+            #   `NN` §X                              （反引号包裹的编号）
+            #   [NN_xxx.md](NN_xxx.md) §X            （Markdown 链接）
+            #   NN_xxx.md §X                         （纯文本文件名）
+            head = text[max(0, m.start() - 120):m.start()].rstrip()
+            # 前缀的四种写法，一律以"文档编号/文件名"结尾（可能还跟着一个 `)`，
+            # 因为 Markdown 链接 `[file.md](file.md)` 在截断后以 `)` 收尾）。
+            if re.search(
+                r"`0[1-9]`$"
+                r"|0[1-9]_[a-z0-9_]+\.md`?\)?$",
+                head,
+            ):
+                continue
+            if sec not in headings:
+                line_no = text[:m.start()].count("\n") + 1
+                problems.add(f"{doc.name}:{line_no} 自引用 §{sec}，但本文档无此节")
+
     # --- 检查 7: Markdown 表格列数一致 ---
     # 表格少一个 `|` 不会让任何断言失败，但会让渲染错乱、内容错位。
     # 这类错误在手工编辑长表格时出现过两次。

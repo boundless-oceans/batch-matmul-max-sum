@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -165,3 +166,29 @@ def test_checker_detects_broken_table():
     assert mod._broken_tables("```\n| a | b |\n| 1 | 2 | 3 |\n```\n") == []
     # 两个正常的独立表格不应误报
     assert mod._broken_tables("| a | b |\n| - | - |\n\n| c | d |\n| - | - |\n") == []
+
+
+def test_checker_detects_bad_self_reference():
+    """校验器必须检出文档内指向不存在节号的自引用。
+
+    改写节号时极易漏改正文里的自引用（本项目已发生一次），而这类漂移不会让
+    任何断言失败。同时必须**不误报**带文档前缀的跨文档引用——那是别的文档
+    的节号，在本文档里当然找不到。
+    """
+    spec = importlib.util.spec_from_file_location("check_registry7", CHECKER)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # 带文档前缀的引用不应被当作自引用。四种前缀写法各测一次。
+    prefixed = [
+        "见 `02` §5.2 的说明",
+        "见 [`02_tiling_data.md`](02_tiling_data.md) §1 的说明",
+        "见 02_tiling_data.md §1 的说明",
+        "见 `02_tiling_data.md` §1 的说明",
+    ]
+    pat = re.compile(r"(?<![`0-9])§(\d+(?:\.\d+)?)")
+    for text in prefixed:
+        head = text[: pat.search(text).start()][-120:].rstrip()
+        is_prefixed = bool(re.search(r"`0[1-9]`$|0[1-9]_[a-z0-9_]+\.md`?\)?$", head))
+        assert is_prefixed, f"未识别为跨文档引用: {text!r}（head={head!r}）"
