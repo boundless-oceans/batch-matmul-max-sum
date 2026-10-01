@@ -32,3 +32,7 @@ CMakeCache.txt
 .idea/
 *.swp
 .DS_Store
+
+# CANN 工具链（本机仿真用，十几 G，绝不入库）
+/Ascend/
+/build_sim/
