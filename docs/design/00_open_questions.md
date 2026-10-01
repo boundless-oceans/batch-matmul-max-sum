@@ -50,7 +50,6 @@
 | `L` | `02` §6 | 行分配公式的**跨语言一致性**验证手段 | 由模拟器生成 `(B,M,核数)→各核行区间` 测试向量，供 C++ 侧核对 | 阶段 4 |
 | `M` | `03` §5.4 | `SetOrgShape` 的 `orgK` 填 `K` 还是 `M` | 用 `M≠K` 且不整除的小样例一次试出 | 阶段 6 |
 | `N` | `03` §5.3 | 转置时 L1 buffer 尺寸是否需相应调整 | 转置场景 `AL1Size` 算法与非转置不同；由 tiling API 自动处理，异常再查 | 阶段 6 |
-| `OQ-003` | `04` §2.2 | Cube 输出到 UB（VECIN）时 C 的 format 是 ND 还是 NZ | 上服务器后第一步验证（最小用例）；失败则执行 §2.3 的 GM 回退方案 | 阶段 6 |
 | `OQ-004` | `04` §3.3 | `ReduceSum` 的 pattern 版是否接受第二维为 1 的形状 `{n, 1}` | 若不被接受，改用基础 API `ReduceSum` 整体归约成标量 | 阶段 4 / 6 |
 | `OQ-005` | `04` §6 | 从 UB 向 GM 写单个 float 的推荐方式 | 当前设计为先在 UB 内整理成连续块再一次性写出 | 阶段 4 / 6 |
 | `OQ-007` | `04` §3.1 | 不传 `sharedTmpBuffer` 的 `ReduceMax` 重载，框架自动申请的临时空间是否足够 | 若不足则改用手动版本并调用 `GetReduceMaxMaxMinTmpSize` | 阶段 4 / 6 |
@@ -58,6 +57,9 @@
 | `OQ-020` | `04` §0.3 | `__mix__` 的属性顺序。官方两处写法不同：`bare_mix.asc` 为 `extern "C" __global__ __mix__(1, 2) void`，而 `DataStoreBarrier.md` 为 `__mix__(1,2) __global__ __aicore__ void` | 取前者（可编译的工作代码）；若编译报错再换顺序 | 阶段 6 |
 | `OQ-021` | `04` §0.3 | `CrossCoreSetFlag` 的 `modeId` 与 `flagId` 取值。官方示例用 `0x2` / `3`，含义未见于文档 | 确认能否任意取（只要 Set/Wait 配对）；官方示例是唯一依据 | 阶段 6 |
 | `OQ-022` | `04` §0.3 | 本算子是否需要 `REGIST_MATMUL_OBJ` 与 workspace。官方 bare_mix 示例用 `REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), mmObj, &tiling)` | 与 `OQ-017` 相关；若需要 workspace 则 `02` §5.3 的假设需改 | 阶段 6 |
+| `OQ-023` | `06` §1.2 | `run_kernel` 在同一次评测中是被反复调用（同进程多用例）还是每用例各起一个进程 | 决定能否缓存 tiling 计算结果；不确认则不做该优化 | 阶段 6 |
+| `OQ-024` | `06` §4.3 | 赛题四.1 的"多次执行结果应保持一致"是逐位一致还是容差内一致 | **这是 M 维切分能否实施的前提**——若要求逐位一致，则任何依赖浮点加法顺序的跨核方案（原子加、部分和二次归约）都不可用，batch 对齐切分成为唯一正确选择 | 阶段 6 |
+| `OQ-025` | `06` §7 | 本机能否安装 CANN 工具链以启用 CPU Debug / SIM 仿真模式 | 两者都依赖环境变量 ASCEND_HOME_PATH（见 CMakeASCInformation.cmake:88-129）。**若能启用则迭代成本从"一次提交配额"降到"一次本地编译"**，价值高于任何单点优化；但 CPU Debug 结果不能替代平台提交（评测用平台自己的 CMakeLists.txt） | 阶段 6 |
 | `OQ-018` | `05` §2 | 方案 A 下 `y[b]` 的预先清零在哪做 | 仅在回到方案 A 时才需要（条件见 `05` §6）。候选 `run_kernel` 内 `aclrtMemset` 或 device 侧先清零再同步 | 暂缓 |
 | `OQ-009` | `platform` §7 | 模板注释用 `__global__ __cube__`，而 devkit 直调示例全用 `__global__ __vector__` | 优先按模板给的 `__cube__` 写；编译报错则改 `__vector__` | 阶段 6 |
 | `OQ-012` | `platform` §7 | 平台是否为 15 个用例各自独立编译 | 影响 dtype 分派策略与编译耗时；由首次提交的耗时推断 | 阶段 6 |
@@ -100,6 +102,7 @@
 | `I`：`TCubeTiling` 是普通 struct 还是 TilingData 类 | **TilingData 类**，必须用访问器。取 `optiling::TCubeTiling`（依据官方直调示例 `matmul_fused.asc:233-248`）。**此前判断有误**——早先按算子工程范例认定是"普通 struct、直接访问成员"，按那个写法在 kernel 里会直接编译失败 | `02` §3.4 |
 | `OQ-013`：host 侧 tiling API 能否在 `kernel.asc` 内使用 | **可以**。官方直调示例 `matmul_fused.asc` 在同一 `.asc` 内构造 `matmul_tiling::MultiCoreMatmulTiling` 并调用 `PlatformAscendCManager::GetInstance()`；其 host 侧函数 `void GenerateTiling(...)`（`:203`）是普通函数、无 `__aicore__` | `02` §3.4 |
 | `OQ-015`：`TCubeTiling` 的定义来自哪个头文件 | `"kernel_tiling/kernel_tiling.h"`，另需 `"tiling/tiling_api.h"` 与 `"tiling/platform/platform_ascendc.h"`。结论取自 `matmul_fused.asc:14-20` 的实际 include 列表 | `02` §3.1 |
+| `OQ-003`：UB 输出路径的 C format（ND 还是 NZ） | **NZ**。`GetTensorC` 写 VECIN 的重载注释原文："`@param [out] co2Local: get C matrix to VECIN, data format only supports NZ`"（`adv_api/matmul/matmul.h:313`） | `04` §2.2 |
 | `OQ-006`：跨核相加 `y[b]` 如何完成 | **已解决**——决策为改为 batch 对齐切分，使每个 `y[b]` 只被一个核写，跨核相加问题从结构上消失。代价经实测量化几乎为零：12 个用例中 10 个的 `M ≤ 128`（仅 1 个 M-tile），那些用例在两种方案下都是单核；真正有差异的仅 `large_square`（6→8，变好）与 `m_large_n_small`（11→16，略降）。详见 `05_decision_batch_aligned.md` | `05` |
 
 ---

@@ -143,15 +143,17 @@ type for output matrix.")` 位于 `impl/adv_api/detail/matmul/matmul_impl_base.h
 但经查该断言的作用条件是 `PhyPosIsL0C(C_TYPE::pos)`，**不作用于 VECIN 路径**，
 故与本节无关。
 
-**待确认 `OQ-003`**：Cube 输出到 UB（VECIN）时 C 的 format 是 ND 还是 NZ。
-性质与影响：
+**`OQ-003` 已解决**：Cube 输出到 UB（VECIN）时 **C 的 format 只能是 NZ**。
 
-- 若 **ND 可行**：按官方范例实现，无需数据重排
-- 若 **只支持 NZ**：Cube 输出为分形格式，Vector 侧直接归约会取到错误的元素，
-  需要先做 NZ→ND 重排，或改用下面 2.3 的回退方案
+依据是 `GetTensorC` 写 VECIN 的重载注释原文（`adv_api/matmul/matmul.h:313`）：
 
-**上服务器后的第一步就是验证这一点**（见 §7 步骤 1）。验证成本很低：
-`baseM=baseN=16`、`K=32`、单 batch 的最小用例，与 golden 比对即可判定。
+> `@param [out] co2Local: get C matrix to VECIN, data format only supports NZ`
+
+**影响**：Cube 写入 UB 的数据是**分形（NZ）格式**，Vector 侧若按行主序直接
+归约会取到错误的元素——**必须先做 NZ→ND 的重排，或走 §2.3 的 GM 回退方案**。
+
+这条此前被列为"上服务器后第一步要验证"的未知项，现在有了确定的答案，
+故 §7 的验证顺序中该项可以降级。
 
 ### 2.3 回退方案：Cube 写 GM，Vector 再读
 
@@ -425,7 +427,7 @@ batch 边界**和** `baseM` tile 边界，两者的切分互不对齐。
 
 | 顺序 | 内容 | 为什么排这里 |
 | :--- | :--- | :--- |
-| 1 | `C_TYPE` 用 `VECIN` + `ND`，最小用例（`B=1, M=16, N=16, K=32`，无转置） | `OQ-003` 决定融合方案成败，**失败则执行 §2.3 回退方案** |
+| 1 | `C_TYPE` 用 `VECIN` + **NZ**（`OQ-003` 已确认非 ND），最小用例（`B=1, M=16, N=16, K=32`，无转置） | 验证 NZ→ND 重排是否正确；若重排代价过高则执行 §2.3 回退方案 |
 | 2 | 四种 transpose 组合 | 验证 `03` §4 的三处一致性 |
 | 3 | M/N 尾块（`M=17, N=13`） | 验证 §5 |
 | 4 | 全负相似度用例 | 验证 `-inf` 初值（赛题 3.7 点名） |

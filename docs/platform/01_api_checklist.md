@@ -113,12 +113,38 @@
 | `matmul_tiling::DataType` | `DT_FLOAT = 0`、`DT_FLOAT16 = 1` | `matmul_tiling_base.h:36-37` | ✅ |
 | `matmul_tiling::DataType` bf16 | **`DT_BFLOAT16 = 33`** | `matmul_tiling_base.h:68` | ⚠️ 该枚举里**另有一个 `DT_BF16 = 27`**（同为"bf16 type"注释）。Matmul tiling 语境应用 `DT_BFLOAT16`——CANN 8.2 指南 `:87892` 在 `SetAType` 的 `DataType` 取值处即写 `DT_BFLOAT16`；`DT_BF16` 的其余出现均在算子注册语境（`ge::DT_BF16`） |
 
+### Matmul 对象接口（融合与优化用）
+
+出处：`adv_api/matmul/matmul.h`（v9.0.0 行号，与 v9.1 一致）。
+
+| API | 真实签名 | 结论 |
+| :--- | :--- | :--- |
+| `GetTensorC` → UB | `template <bool sync = true> void GetTensorC(const LocalTensor<DstT>& co2Local, uint8_t enAtomic = 0, bool enSequentialWrite = false)`（`:297`） | ✅ **写 VECIN 时 format 只能是 NZ**（注释原文，`OQ-003` 据此解决） |
+| `GetTensorC` → GM | `template <bool sync = true> void GetTensorC(const GlobalTensor<DstT>& gm, ...)`（`:307`） | ✅ 支持 ND/NZ |
+| `GetTensorC` → GM+UB | `template <bool sync = true> void GetTensorC(const GlobalTensor<DstT>& gm, const LocalTensor<DstT>& co2Local, ...)`（`:318`） | ✅ 格式仅 NZ |
+| `sync` 参数 | `false` 为异步 | ✅ **异步取结果可让归约与下一块 Matmul 重叠**（`06` §2.1 的主要优化手段） |
+| `IterateAll` | `void IterateAll(const GlobalTensor<DstT>& gm, ...)`（`:251`） | ✅ 但**一次算完全部**，无法边算边归约 |
+| `IterateBatch` | `void IterateBatch(...)`（`:272`/`:285`） | ✅ 整 batch 一次，同样不适合细粒度融合 |
+| `SetTail` | `void SetTail(int tailM = -1, int tailN = -1, int tailK = -1)`（`:112`） | ✅ 不改 tiling 而重设单核 shape，**尾块处理用这个** |
+| `SetSingleShape` | `void SetSingleShape(int singleM, int singleN, int singleK)`（`:105`） | ✅ |
+| `SetOrgShape`（设备侧） | `void SetOrgShape(int orgM, int orgN, int orgK)`（`:89`） | ✅ 注意与 tiling 类的同名方法不同（`03` §5.2） |
+| `SetTensorA` / `SetTensorB` | `(const GlobalTensor<SrcT>& gm, bool isTranspose = false)`（`:118`/`:124`） | ✅ 三处一致性的第 2 处 |
+| `End` | `void End()`（`:334`） | ✅ 计算结束；跨核同步 flag 应在其后发 |
+
+### tiling 类的优化相关接口
+
+| API | 真实签名 | 结论 |
+| :--- | :--- | :--- |
+| `SetDoubleBuffer` | `int32_t SetDoubleBuffer(bool a, bool b, bool c, bool bias, bool transND2NZ = true, bool transNZ2ND = true)`（`matmul_tiling_base.h:497`） | ✅ 五个独立开关，按 L1/L0C 容量选择性开启 |
+| `SetBufferSpace` | `int32_t SetBufferSpace(int32_t l1Size = -1, int32_t l0CSize = -1, int32_t ubSize = -1, int32_t btSize = -1)`（`:460`） | ✅ 显式控制占用，**融合归约后 UB 变紧张，这条有用** |
+| `SetFixSplit` | `int32_t SetFixSplit(int32_t baseMIn = -1, int32_t baseNIn = -1, int32_t baseKIn = -1)`（`:451`） | ✅ 固定 baseM/baseN |
+
 ## 尚未核对（写最终实现时要补）
 
 以下 API 计划使用但**尚未核对**，届时必须补入本台账：
 
-- `Matmul` 对象：`SetTensorA` / `SetTensorB` / `SetOrgShape`（设备侧版本）
-- `ReduceMax` / `ReduceSum` 的 `Pattern::Reduce::AR` 版本
+- `ReduceMax` / `ReduceSum` 的 `Pattern::Reduce::AR` 版本（**已确认存在**，见 `04` §3，
+  但**尚未核对签名**）
 - `SetAtomicAdd` / `DisableDmaAtomic`（仅在回到"batch 内切分"方案时需要）
 - `ASSERT` 的可用性
 - 从 UB 向 GM 写单个 float 的推荐方式（`OQ-005`）
