@@ -15,6 +15,7 @@ import pytest
 from judge import cases as cases_mod
 from judge import reference as ref
 from simulator import (
+    num_m_tiles,
     describe_plan,
     plan_tiling,
     rows_covered_once,
@@ -108,6 +109,74 @@ def test_tiling_choice_does_not_change_result():
             assert ref.compare(actual, golden, dtype_key=c["dtypeKey"]).passed, (
                 f"cores={cores}, baseM={base_m}, baseN={base_n} 结果不一致"
             )
+
+
+def test_multi_batch_and_multi_tile_per_core():
+    """**针对性覆盖"一个核同时处理多个 batch、且每个 batch 有多个 M-tile"的情形。**
+
+    这是 `kernel_sim` 里最易写错的一处：按 batch 分段的累加循环
+    （对 `np.unique(batch_of_row)` 的循环）若被误写成"整段求和后全给某个
+    batch"，输出会整体错位。
+
+    **该路径的触发条件较苛刻**，现有用例集覆盖不到：
+    需要单个核既负责 **>1 个 batch**、又让某个 batch 包含 **>1 个 M-tile**。
+    实测：`B=3, M=40, baseM=16, 核数=1` 触发；而 `B=64, M=8`（每 batch 仅
+    1 个 tile）与 `B=4, M=1024`（每核仅 1 个 batch）**都不触发**。
+
+    故此处用合成数据专门构造该形态，并在多种核数下验证，让每核的
+    (batch 数, M-tile 数) 组合覆盖到 (3,8)、(2,5)、(1,5) 等。
+    """
+    B, M, N, K, base_m, base_n = 3, 40, 16, 32, 16, 16
+    g = np.random.default_rng(0)
+    x1 = g.standard_normal((B, M, K)).astype(np.float16)
+    x2 = g.standard_normal((B, K, N)).astype(np.float16)
+    golden = ref.batch_matmul_max_sum(x1, x2)
+
+    for cores in (1, 2, 3, 4, 8):
+        plan = plan_tiling(B=B, M=M, N=N, K=K, num_cores=cores,
+                           base_m=base_m, base_n=base_n)
+        per_core_batches = [len(list(plan.work_batches(w)))
+                            for w in plan.works if w.num_rows > 0]
+        actual = simulate_kernel(x1, x2, num_cores=cores,
+                                 base_m=base_m, base_n=base_n)
+        result = ref.compare(actual, golden, dtype_key="float16")
+        assert result.passed, (
+            f"cores={cores}（每核 batch 数 {per_core_batches}）结果不一致: {result.summary()}"
+        )
+
+    # 至少要有一种情形真的落到"每核 >1 batch 且 >1 M-tile"
+    plan1 = plan_tiling(B=B, M=M, N=N, K=K, num_cores=1, base_m=base_m, base_n=base_n)
+    w = plan1.works[0]
+    assert len(list(plan1.work_batches(w))) > 1, "单核应负责多个 batch"
+    assert num_m_tiles(w.num_rows, base_m) > 1, "该核应有多个 M-tile"
+
+
+def test_multi_batch_per_core_with_many_batches():
+    """`B` 远大于核数时（每核多个 batch），逐 batch 输出不得错位。"""
+    c = cases_mod.find_case("b64_max")          # B=64
+    golden = ref.golden_from_case(c)
+    for cores in (1, 2, 4, 8, 16, 32, 64, 100):
+        plan = plan_tiling(B=64, M=8, N=8, K=32, num_cores=cores, base_m=8, base_n=8)
+        per_core = [len(list(plan.work_batches(w))) for w in plan.works if w.num_rows > 0]
+        actual = simulate_case(c, num_cores=cores, base_m=8, base_n=8)
+        result = ref.compare(actual, golden, dtype_key=c["dtypeKey"])
+        assert result.passed, (
+            f"cores={cores}（每核负责 {per_core[:4]} 个 batch）结果不一致: {result.summary()}"
+        )
+
+
+def test_single_core_handles_all_batches():
+    """核数为 1 时，该核负责全部 batch——多段累加分支被完全走到。"""
+    c = cases_mod.find_case("b64_max")
+    golden = ref.golden_from_case(c)
+    plan = plan_tiling(B=64, M=8, N=8, K=32, num_cores=1, base_m=8, base_n=8)
+    assert len(list(plan.work_batches(plan.works[0]))) == 64
+
+    actual = simulate_case(c, num_cores=1, base_m=8, base_n=8)
+    assert ref.compare(actual, golden, dtype_key=c["dtypeKey"]).passed
+    # 逐 batch 核对，确认没有整体错位
+    assert actual.shape == (64,)
+    assert np.allclose(actual, golden, rtol=1e-3, atol=1e-3)
 
 
 # ------------------------------------------------- 标准 3: 行覆盖不重不漏
