@@ -28,7 +28,15 @@ import sys
 from pathlib import Path
 
 DESIGN_DIR = Path(__file__).resolve().parent.parent / "docs" / "design"
+REPO_ROOT = DESIGN_DIR.parent.parent
 REGISTRY = DESIGN_DIR / "00_open_questions.md"
+
+# 登记册允许把事项归属到 `docs/design/0*.md` 之外的文件。
+# 键 = 登记册归属列中写作前缀的名字；值 = 相对仓库根的路径。
+# 这类文档不在 DESIGN_DIR 下，故不参与「反向检查」（即不要求它只含已登记编号）。
+NAMED_DOCS: dict[str, Path] = {
+    "platform": REPO_ROOT / "docs" / "platform" / "00_platform_mechanics.md",
+}
 
 # 归属文档名 → 该文档涉及的编号（由登记册第 2 节解析得出，此处仅作交叉校验）
 LEGACY_ID_RE = re.compile(r"^[A-Z]$")
@@ -179,6 +187,19 @@ def main() -> int:
             # 它们不描述具体 API，只登记待办；不做归属校验。
             continue
         doc_name = owner.split()[0].strip("`") if owner else ""
+
+        # 归属可能是 docs/design/ 之外的文件，由 NAMED_DOCS 显式登记
+        if doc_name in NAMED_DOCS:
+            target_path = NAMED_DOCS[doc_name]
+            if not target_path.is_file():
+                problems.add(f"编号 {item} 归属文档不存在: {target_path}")
+            elif item not in find_ids_in_doc(target_path.read_text(encoding="utf-8")):
+                problems.add(
+                    f"编号 {item} 登记在 {target_path.name}，但该文档正文中找不到"
+                    f"定义式标记（应为 `**待确认 {item}**：`）"
+                )
+            continue
+
         # 登记册中归属写作 `01` §2.1 这类形式，还原为文件名
         prefix = re.match(r"(\d+)", doc_name)
         if not prefix:

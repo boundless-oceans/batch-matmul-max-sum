@@ -48,6 +48,7 @@ storage shape 而非要求真的转置，四种布局组合都要支持；归约
 │   ├── runner.py           # CLI 入口
 │   └── tests/              # pytest 测试
 ├── docs/                   # 赛题、赛区规则、官方范例参考
+│   ├── platform/           # 竞赛平台机制与提交模板（直调模式）
 │   ├── design/             # 算子设计文档（接口契约、tiling、流水等）
 │   └── research/           # API 调研报告，设计文档的证据来源
 ├── tools/                  # 辅助脚本
