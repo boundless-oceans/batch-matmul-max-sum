@@ -59,6 +59,8 @@ template <typename T> struct LocalTensor {
     // devkit 中 LocalTensor::SetValue 采用 uint64_t offset，此处照此建模
     void SetValue(uint64_t, T) const {}
     T GetValue(uint64_t) const { return T{}; }
+    // 裸指针访问（绕开 GetValue 的边界检查）——本项目用它降低内层开销
+    T* GetPhyAddr() const { return nullptr; }
 };
 
 // ---- 向量指令（按 devkit 实际签名建模）----
