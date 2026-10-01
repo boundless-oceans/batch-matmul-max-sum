@@ -119,6 +119,10 @@ docs: 补充 ROS 环境变量导致 pytest 加载失败的说明
   `tools/check_submit_compliance.py` 拦下（必须删净才能提交）。
   理由：本项目有过一次同类事故——`printf` 被当作探测手段留在提交里，
   被平台判为"不合规内容"（见 [`LESSONS.md`](LESSONS.md) 八）。
+- **本地调试 Cube 时，在 local_build/CMakeLists.txt 定义 `ASCENDC_CUBE_ONLY`**，
+  这样 Matmul 会实例化为 `MatmulImpl` 而可直接用于 `__cube__` 核。
+  否则得到 `MatmulClient`（需 `__mix__` 协同），而仿真下 `__mix__` 的 AIC
+  分支不执行，无法验证。详见 [`LESSONS.md`](LESSONS.md) 十一。
 - **必须用平台会用的每一种 dtype 验证**。fp16 与 bf16 在 C++ 层面都是
   `uint16_t`，极易被当成同一种东西，但位布局完全不同（1+5+10 vs 1+8+7）。
   见 [`LESSONS.md`](LESSONS.md) 十：19/20 用例是 fp16，bf16 全错却没被发现。

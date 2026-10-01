@@ -456,3 +456,45 @@ GCC 给出 `warning: 'host' attribute directive ignored` —— **属性被直�
 `tools/tests/test_asc_syntax.py` 的注入锚点原本是 `", 2);"`。实参由字面量
 改为 `dtypeCode` 后，该测试因找不到锚点而失败。**锚点应选取与具体实参无关
 的片段**（现已改为 `"x1, x2, y, d.B, d.M, d.N, d.K,"`）。
+
+---
+
+## 十一、CPU 仿真下 Cube/Matmul 的可用路径（实验结论）
+
+为判断"能否在本地开发 Cube 方案"，做了一系列实验。结论如下，
+**这些结论决定了 B 路线的可行性**。
+
+### 实测结果
+
+| 实验 | 结果 |
+| :--- | :--- |
+| `__mix__(1,2)` 能否为 dav-2201 编译 | ✅ 可以 |
+| `__mix__` 的 **AIV 分支**在仿真下执行 | ✅ 执行 |
+| `__mix__` 的 **AIC 分支**在仿真下执行 | ❌ **不执行**（累加编码只得到 AIV 的贡献） |
+| 跨核 flag `CrossCoreSetFlag/WaitFlag` | ⚠️ 行为不一致（曾挂住 60s，也曾直接返回 0） |
+| 纯 `__cube__` 核函数在仿真下执行 | ✅ **执行**（写 77 得到 77） |
+| `Matmul` + `REGIST_MATMUL_OBJ` 在 `__cube__` 核 | ⚠️ 编译通过、运行崩溃（未设 tiling） |
+
+### 关键机制（`adv_api/matmul/matmul_intf.h:38-70`）
+
+CPU 调试模式下，Matmul 的实现按宏二选一：
+
+| 宏 | 得到的类型 | 适用 |
+| :--- | :--- | :--- |
+| 未定义 `ASCENDC_CUBE_ONLY` | `MatmulClient` | `__mix__` 核（需 AIC+AIV 协同） |
+| **定义了 `ASCENDC_CUBE_ONLY`** | **`MatmulImpl`** | **`__cube__` 核（单核即可）** |
+
+**这是本次最有价值的发现**：因为 `__mix__` 的 AIC 分支在仿真下不执行，
+`MatmulClient` 路线**无法本地验证**；而定义 `ASCENDC_CUBE_ONLY` 后可用
+`MatmulImpl` 直接写在 `__cube__` 核里，**绕开了 AIC 分支问题**。
+
+### 教训
+
+1. **"某条路走不通"的结论，要先确认是不是"某条*实现路径*走不通"。**
+   我最初以为"B 无法本地验证"，实际是"`__mix__` 路线无法本地验证"——
+   换成 `__cube__` + `ASCENDC_CUBE_ONLY` 就有路了。
+2. **框架的头文件里藏着开关。** `matmul_intf.h` 的 `#ifdef ASCENDC_CUBE_ONLY`
+   分支是本地能否验证 Cube 的关键，而它不在任何教程的显著位置。
+3. **探针要参数化。** 本轮前 7 次探针尝试全部失败，共同死因是"另起入口会
+   破坏框架的符号注入"。最终有效的方式是**临时改 `run_kernel` 的实现**
+   ——`run_kernel` 是 `kernel.asc` 唯一的契约入口，用它做探针不需要新入口。
