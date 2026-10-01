@@ -48,3 +48,6 @@ local_build/**/b/
 .platform_ok.asc
 .kernel_platform_ok.asc
 .kb.asc
+# 本地开发副本（由 submit/kernel.asc 复制而来，不作为符号链接，
+# 以免本地实验直接改到待提交文件）
+local_build/kernel.asc
