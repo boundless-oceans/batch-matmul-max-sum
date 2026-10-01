@@ -71,37 +71,82 @@ PlatformAscendCManager::GetInstance("Ascend910B2")     // 正常返回（实测�
 **结论**：Matmul 的对象构造、注册、设张量全部正常，**卡在 `IterateAll`**；
 且与 tiling 是手工构造还是 API 生成无关（两种都挂）。
 
-## 结论：CPU 仿真不支持 Cube 计算
+## 失败点定位：在 `Matmul` API 层，不在 Cube 能力
 
-综合以下证据，**判定 CPU 仿真下无法执行 Cube 计算**：
+**曾一度判定"CPU 仿真不支持 Cube 计算"，该结论已作废**——因为后来查到反证：
+仿真库 `libcpudebug.so` 中**已实现 `Mmad`**（见下节）。正确结论是：
 
-| 证据 | 现象 |
+> **Cube 运算能力在仿真中存在；失败点在更高层的 `Matmul` 封装。**
+
+现象汇总：
+
+| 层次 | 现象 |
 | :--- | :--- |
-| `__mix__` 的 AIC 分支 | 不执行（结论 3） |
-| `Matmul` 的 `IterateAll` | 挂住，与 tiling 来源无关 |
-| **把核标记为 `__cube__`** | **堆损坏**（`malloc(): unaligned tcache chunk detected`） |
-| 核标记为 `__aicore__` | 链接失败（`auto derivate failed`） |
+| `Mmad`（底层 Cube 指令） | **仿真已实现**（符号存在） |
+| 纯 `__cube__` 核函数（只 `SetValue`） | ✅ 执行 |
+| `Matmul` 的对象构造 / `REGIST` / `SetTensor` | ✅ 全部通过 |
+| **`Matmul` 的 `IterateAll`** | ❌ **挂住** |
+| 核标记为 `__aicore__` | ❌ 链接失败（`auto derivate failed`） |
 
-**注意**：纯 `__cube__` 核函数（只做 `SetValue`）能执行（结论 5），但**一旦
-使用 Cube 能力（Matmul）就失败**。即"Cube 核能被调用，但 Cube 计算不能完成"。
+即"Cube 核能被调用，但高层 `Matmul` 的迭代无法完成"。
+
+### 作废结论的教训
+
+**"某条路走不通"要先确认是不是"某个*实现路径*走不通"。** 当时只看 `Matmul`
+挂住就下结论，而没查底层指令是否实现。**一条负面结论应当先找反证再下。**
 
 ### 已排除的排查方向
 
 - ~~`GetSysWorkSpacePtr()` 无效~~ → 实测非空
 - ~~手工 tiling 不完整~~ → 真实 tiling 同样挂
-- ~~矩阵尺寸太小~~ → 未及验证，但前三项已足以判定
+- ~~核形态不对~~ → `__cube__` 与 `__mix__` 两条路都试过，都挂
+- ~~需装 ops 包~~ → 已排除（见下）
+
+### ops 包与本题无关（已查证）
+
+| 组件 | 提供什么 | 与本场景的关系 |
+| :--- | :--- | :--- |
+| toolkit（已装） | 编译器 + Ascend C 库 + 仿真运行时 | 正在用的就是它 |
+| ops 包（2.14 GB） | 编译好的算子二进制 | 给 torch 等框架调算子用 |
+
+**证据**：仿真库 `libcpudebug.so` 的**未定义 Cube/Matmul 符号数为 0**，
+`MmadPvImpl` 是自带实现。本项目是**直调**（自写 kernel），不走算子库，
+故装 ops 包对 Cube 问题无帮助。
 
 ### 对路线选择的影响
 
-**Cube 方案无法在本地迭代验证。** 若要做，只能盲提交，而本项目的经验是
-每次盲提交只暴露一个问题（宿主指针崩溃、`__aicore__` 缺失、`printf` 不合规、
-bf16 全错——四次平台反馈各暴露一类问题）。Cube 涉及的未知数远多于这些。
+Cube 方案的**数值部分**（`Mmad` 算得对不对）本地可验证；但**核间协同架构**
+（AIC/AIV 跨核同步）本地验证不了——而真机上 Cube 核**不能执行向量指令**，
+仿真会默默代跑（都是 x86），**这正是本地与服务器差异最大的地方**。
 
-**因此建议**：Cube 方案暂不推进，除非愿意承担多轮盲提交的成本。
+## B2 实验：`MatmulClient`（`__mix__` 路径）同样挂住
+
+`Matmul` 在 CPU 调试模式下按宏二选一，两条路都试过：
+
+| 路径 | 核形态 | Matmul 类型 | 结果 |
+| :--- | :--- | :--- | :--- |
+| B1 | `__cube__` | `MatmulImpl`（需 `ASCENDC_CUBE_ONLY`） | 前 4 步通过，`IterateAll` 挂 |
+| **B2** | **`__mix__(1,2)`** | **`MatmulClient`**（不定义该宏） | 前 4 步通过，`IterateAll` 挂 |
+
+B2 的分步标记（探针写在已有 kernel 体内）：
+
+| 步 | 代码 | 标记 | 结果 |
+| :-: | :--- | :-: | :--- |
+| 1 | `__mix__` 核身份 | 102（AIV） | ✅ |
+| 2 | 构造 `MatmulClient` | 200 | ✅ |
+| 3 | `REGIST_MATMUL_OBJ` + `SetTensorA/B` | 400 | ✅ |
+| 4 | **`IterateAll(cG)`** | 500 | ❌ **挂住** |
+
+**结论：问题在 `Matmul` API 层，与核形态（`__cube__` / `__mix__`）和宏配置无关。**
 
 ### 仍可尝试的方向（若日后重启本路线）
 
-1. 装 **ops 包**后看仿真是否有变化
+0. **改用底层 `Mmad` 自行拼接**（最有希望）。仿真库 `libcpudebug.so` 中
+   **已实现 `MmadPvImpl`**，故 Cube 运算能力存在；只是高层 `Matmul` 的
+   `IterateAll` 不可用。需自建 `GM→L1→L0A/L0B→Mmad→L0C→GM` 数据流
+   （`DataCopy` / `LoadData` / `Mmad` / `Fixpipe`）。
+1. ~~装 **ops 包**~~ → 已排除：仿真库未定义任何指向 ops 的符号（未定义
+   Cube/Matmul 符号数为 0），`MmadPvImpl` 自带实现，与 ops 包无关
 2. 试 `Iterate`（分块迭代）代替 `IterateAll`
 3. 矩阵尺寸换 128×128×128
 4. 查 CANN 是否提供 **Cube 仿真的专门模式**（非 `--run-mode=cpu`）
