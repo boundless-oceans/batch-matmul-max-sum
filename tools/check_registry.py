@@ -76,11 +76,17 @@ def parse_registry(text: str) -> tuple[dict[str, str], set[str], dict[str, str]]
 
         raw_id = cells[0].strip("`")
         if section == "open":
-            # 未决表列: 编号 | 归属 | 事项 | 处置 | 预计消除于
-            if len(cells) < 5 or not (LEGACY_ID_RE.match(raw_id) or NEW_ID_RE.match(raw_id)):
+            is_id = LEGACY_ID_RE.match(raw_id) or NEW_ID_RE.match(raw_id)
+            if not is_id:
                 continue
-            open_items[raw_id] = cells[1]
-            desc[raw_id] = cells[2]
+            # 未决表有两种列数：主表 5 列（编号|归属|事项|处置|预计消除于），
+            # 2.1 节的两条验证手段 3 列（编号|事项|为什么重要），后者无独立归属文档
+            if len(cells) >= 5:
+                open_items[raw_id] = cells[1]
+                desc[raw_id] = cells[2]
+            elif len(cells) >= 2:
+                open_items[raw_id] = ""
+                desc[raw_id] = cells[1]
         else:
             # 已解决表列: 事项 | 结论 | 解决于
             resolved.add(cells[0])
@@ -168,6 +174,10 @@ def main() -> int:
         doc_ids[doc.name] = find_ids_in_doc(doc.read_text(encoding="utf-8"))
 
     for item, owner in sorted(open_items.items()):
+        if not owner:
+            # 2.1 节的两条"验证手段是否成立"类条目没有归属文档，
+            # 它们不描述具体 API，只登记待办；不做归属校验。
+            continue
         doc_name = owner.split()[0].strip("`") if owner else ""
         # 登记册中归属写作 `01` §2.1 这类形式，还原为文件名
         prefix = re.match(r"(\d+)", doc_name)
