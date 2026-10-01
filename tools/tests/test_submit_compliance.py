@@ -123,3 +123,38 @@ def test_clean_synthetic_code_passes(tmp_path):
         capture_output=True, text=True, cwd=REPO_ROOT,
     )
     assert proc.returncode == 0, f"干净代码被误报：\n{proc.stdout}\n{proc.stderr}"
+
+
+def test_detects_local_probe_residue(tmp_path):
+    """残留的本地探针块必须被拦下。
+
+    这是最危险的一类残留：探针代码是**真实计算代码**，不会被
+    printf/ASSERT 等检查项拦住，但一旦提交就是把调试版本交上去了。
+    本项目已有过一次同类事故（printf 被留在提交里），故加此防线。
+    """
+    clean = tmp_path / "clean.asc"
+    clean.write_text(
+        "#include \"kernel_operator.h\"\nvoid body() { int a = 1; }\n",
+        encoding="utf-8",
+    )
+    r_clean = subprocess.run(
+        [sys.executable, str(CHECKER), "--kernel", str(clean)],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    assert r_clean.returncode == 0, "干净代码不应被拦"
+
+    dirty = tmp_path / "dirty.asc"
+    dirty.write_text(
+        "#include \"kernel_operator.h\"\n"
+        "#ifdef BMMS_LOCAL_PROBE\n"
+        "void probe() { int x = 1; }\n"
+        "#endif\n"
+        "void body() { int a = 1; }\n",
+        encoding="utf-8",
+    )
+    r_dirty = subprocess.run(
+        [sys.executable, str(CHECKER), "--kernel", str(dirty)],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    assert r_dirty.returncode != 0, "残留探针块必须被拦下"
+    assert "本地探针残留" in r_dirty.stderr

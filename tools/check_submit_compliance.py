@@ -8,6 +8,18 @@
 一次被拒的提交不只是浪费一次配额（每天上限 50 次），还打断迭代节奏。
 这类检查完全可机械化，故不该依赖人记得。
 
+**最重要的一条**：检测 `BMMS_LOCAL_PROBE` 宏。
+
+本地调试时若需要临时改 `submit/kernel.asc`（例如试某个向量 API 的语义），
+**必须**把临时代码放进 `#ifdef BMMS_LOCAL_PROBE ... #endif` 块，并只在本地
+构建时定义该宏。这样：
+
+- 提交版本里该块永远不参与编译（宏未定义）
+- 但**它的存在本身会被本检查器拦下**，必须删干净才能提交
+
+这是防"改完忘了恢复"的机械保险——本项目已有过一次同类事故
+（`printf` 被留在提交里，见 `LESSONS.md` 八）。
+
 **检查项**：
 
 1. 调试输出接口——`printf` / `ASSERT` / `DumpTensor` / `PRINTF` 等。
@@ -33,6 +45,10 @@ DEFAULT_KERNEL = REPO_ROOT / "submit" / "kernel.asc"
 
 # (类别, 说明, 正则)。正则只匹配**代码**，注释先行剔除，避免误报。
 FORBIDDEN = (
+    # 本地探针残留 —— 放在最前，这是最危险的一类：它是真实计算代码，
+    # 不会被其它检查项拦住，但一旦提交就是把调试版本交上去了。
+    ("本地探针残留", "检测到 BMMS_LOCAL_PROBE 探针块 —— 必须删除后才能提交",
+     r"BMMS_LOCAL_PROBE"),
     ("调试输出", "AscendC::printf / printf —— 平台禁止提交调试输出", r"\bprintf\s*\("),
     ("调试断言", "ASSERT / assert —— 属调试工具", r"\b(?:ASSERT|assert)\s*\("),
     ("调试打印", "DumpTensor / PRINTF —— 属调试工具", r"\b(?:DumpTensor|PRINTF|DumpAccChkPoint)\s*\("),
