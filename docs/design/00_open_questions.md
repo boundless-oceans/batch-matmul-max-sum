@@ -45,7 +45,6 @@
 
 | 编号 | 归属 | 事项 | 处置方式 | 预计消除于 |
 | :--- | :--- | :--- | :--- | :--- |
-| `I` | `02` §3 | `TCubeTiling` 是普通 struct 还是 TilingData 类 | 按官方范例用 struct；报错则改用 `set_/get_` 访问器 | 阶段 3 |
 | `J` | `02` §3 | TilingData 字段用 `int32_t` 还是 `uint32_t` | 取 `int32_t` 与 Matmul 一致 | 阶段 3 |
 | `K` | `02` §4.1 | `baseM=baseN=128` 的 UB 占用能否支持双缓冲 | 用 `msprof` 实测后调整 | 阶段 4 / 7 |
 | `L` | `02` §6 | 行分配公式的**跨语言一致性**验证手段 | 由模拟器生成 `(B,M,核数)→各核行区间` 测试向量，供 C++ 侧核对 | 阶段 4 |
@@ -59,9 +58,7 @@
 | `OQ-018` | `05` §2 | 方案 A 下 `y[b]` 的预先清零在哪做 | 仅在回到方案 A 时才需要（条件见 `05` §6）。候选 `run_kernel` 内 `aclrtMemset` 或 device 侧先清零再同步 | 暂缓 |
 | `OQ-009` | `platform` §7 | 模板注释用 `__global__ __cube__`，而 devkit 直调示例全用 `__global__ __vector__` | 优先按模板给的 `__cube__` 写；编译报错则改 `__vector__` | 阶段 6 |
 | `OQ-012` | `platform` §7 | 平台是否为 15 个用例各自独立编译 | 影响 dtype 分派策略与编译耗时；由首次提交的耗时推断 | 阶段 6 |
-| `OQ-013` | `02` §5.1 | `run_kernel` 所在的 `kernel.asc` 由带 `--npu-arch` 的 Ascend 编译器处理，host 侧的 `platform_ascendc` 与 `MultiCoreMatmulTiling` 能否在同一编译单元内正常使用，无 Matmul 直调实例可佐证。**优先级最高**——它决定 tiling 参数是算出来的还是推导出来的 | 首次提交时验证；不可行则自行推导 `TCubeTiling` 各字段 | 阶段 6 |
 | `OQ-014` | `01` §4 | `run_kernel` 内的错误上报方式（无 `OP_LOGE` 类框架接口） | 候选 `AscendC::printf` 或 host 侧 `std::cout`；不影响正确性，影响排障效率 | 阶段 4 |
-| `OQ-015` | `02` §3.1 | `TCubeTiling` 的定义来自哪个头文件 | 原按算子工程写 `"kernel_tiling/kernel_tiling.h"`；`kernel_operator.h` 是否传递性提供未确认。编译报未定义则补 include | 阶段 6 |
 | `OQ-016` | `02` §3.2 | 结构体按值传给 kernel 是否显著增加 launch 开销 | 结构体含 `TCubeTiling`，约 200 字节。不预先优化，阶段 7 用 `msprof` 测后再定 | 阶段 7 |
 | `OQ-017` | `02` §5.3 | Matmul 是否需要 workspace，直调模式下如何提供 | 当前假设不需要（目标路径 Cube 直写 UB）。若回退到 GM 路径则必然需要，届时必须解决 | 阶段 6 |
 
@@ -97,6 +94,9 @@
 | `OQ-008`：提交时哪些文件可改 | **可以**——平台上既能创建文件也能修改文件后提交，工程结构（`CMakeLists.txt` 等）可调。但评测时会替换 `main.asc` 与输入数据，故主要逻辑仍应集中在 `kernel.asc`，其余工程文件的作用是本地自测 | `platform` §7 |
 | `A`–`E`、`G`、`H` 共 7 项：`DataType({...})` 多 dtype 语义、`GetAttrPointer<bool>` 模板参数、`OPS_CHECK_NULL_WITH_CONTEXT` 头文件、`GetStorageShape` vs `GetOriginShape`、`OP_LOGE` 可用性、`Follow` 声明式 dtype 约束、TilingKey 共用 TilingData | **因直调模式而整体作废**——这些全是自定义算子工程框架特有的 API 或机制，直调下不存在（平台负责算子原型与形状/类型推导，transpose 为函数参数，无 TilingKey、无框架上下文）。其中错误上报一项由 `OQ-014` 取代 | `01` §1.1 |
 | `OQ-011`：`availableCoreNum` 与 kernel 内 `GetBlockNum()` 的关系 | **同源**。官方直调示例 `gather.asc:54-63` 用 `PlatformAscendCManager::GetInstance()` 取 `GetCoreNumAiv()` 作为 block 数，与模板中 `main.asc` 经 `aclrtGetDeviceInfo(ACL_DEV_ATTR_CUBE_CORE_NUM)` 取得的值来源一致。故可直接用 `availableCoreNum` 作 block 数 | `platform` §3.3 |
+| `I`：`TCubeTiling` 是普通 struct 还是 TilingData 类 | **TilingData 类**，必须用访问器。取 `optiling::TCubeTiling`（依据官方直调示例 `matmul_fused.asc:233-248`）。**此前判断有误**——早先按算子工程范例认定是"普通 struct、直接访问成员"，按那个写法在 kernel 里会直接编译失败 | `02` §3.4 |
+| `OQ-013`：host 侧 tiling API 能否在 `kernel.asc` 内使用 | **可以**。官方直调示例 `matmul_fused.asc` 在同一 `.asc` 内构造 `matmul_tiling::MultiCoreMatmulTiling` 并调用 `PlatformAscendCManager::GetInstance()`；其 host 侧函数 `void GenerateTiling(...)`（`:203`）是普通函数、无 `__aicore__` | `02` §3.4 |
+| `OQ-015`：`TCubeTiling` 的定义来自哪个头文件 | `"kernel_tiling/kernel_tiling.h"`，另需 `"tiling/tiling_api.h"` 与 `"tiling/platform/platform_ascendc.h"`。结论取自 `matmul_fused.asc:14-20` 的实际 include 列表 | `02` §3.1 |
 | `OQ-006`：跨核相加 `y[b]` 如何完成 | **已解决**——决策为改为 batch 对齐切分，使每个 `y[b]` 只被一个核写，跨核相加问题从结构上消失。代价经实测量化几乎为零：12 个用例中 10 个的 `M ≤ 128`（仅 1 个 M-tile），那些用例在两种方案下都是单核；真正有差异的仅 `large_square`（6→8，变好）与 `m_large_n_small`（11→16，略降）。详见 `05_decision_batch_aligned.md` | `05` |
 
 ---

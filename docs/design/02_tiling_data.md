@@ -89,14 +89,21 @@ struct BatchMatmulMaxSumTiling {
     int32_t baseM;
     int32_t baseN;
     int32_t usedCoreNum;
-    TCubeTiling cubeTilingData;   // 由 Matmul tiling API 填充
+    optiling::TCubeTiling cubeTilingData;   // 由 Matmul tiling API 填充
 };
 ```
 
-**待确认 `OQ-015`**：`TCubeTiling` 的定义来自哪个头文件。本文件原先按算子工程
-写法包含 `"kernel_tiling/kernel_tiling.h"`；`kernel.asc` 已包含
-`"kernel_operator.h"`，但**后者是否传递性地提供 `TCubeTiling` 未确认**。
-首次提交若报类型未定义，补上对应 include。
+**所需的头文件**（依据：官方直调示例 `matmul_fused.asc:14-20` 的实际 include 列表）：
+
+```cpp
+#include "kernel_operator.h"                     // Ascend C 基础 API
+#include "tiling/tiling_api.h"                   // MultiCoreMatmulTiling
+#include "tiling/platform/platform_ascendc.h"    // PlatformAscendCManager
+#include "kernel_tiling/kernel_tiling.h"         // TCubeTiling 定义
+```
+
+**`OQ-015` 已解决**：`TCubeTiling` 由 `"kernel_tiling/kernel_tiling.h"` 提供。
+结论来自官方示例的实际 include 列表，而非推测。
 
 ### 3.2 传递方式：按值作为 kernel 实参
 
@@ -135,32 +142,43 @@ ErfCustomTilingData tiling)`，host 侧启动为
 
 ### 3.4 `TCubeTiling` 的形态
 
-**待确认 `I`**：`TCubeTiling` 的形态在不同 CANN 版本下不一致：
+**`I` 已解决**：`TCubeTiling` **是 TilingData 类，不是普通 struct**，必须用
+访问器读写。
 
-| 版本 | 形态 | 访问方式 |
+| 命名空间 | 定义处 | 形态 |
 | :--- | :--- | :--- |
-| 官方 `MatmulAbs` 范例（`docs/ref_matmul_abs_host.cpp`） | 普通 struct | `tilingData.cubeTilingData.M` 直接成员 |
-| `asc-devkit` 的 `matmul_tilingdata.h` | TilingData 类（由 `BEGIN_TILING_DATA_DEF(TCubeTiling)` 定义） | `set_M()` / `get_M()` 访问器 |
+| `optiling::TCubeTiling` | `adv_api/matmul/matmul_tilingdata.h`，由 `BEGIN_TILING_DATA_DEF(TCubeTiling)` 定义 | TilingData 类，**本项目使用** |
+| `AscendC::tiling::TCubeTiling` | 同上，另一命名空间 | 同类结构 |
 
-`asc-devkit/include/adv_api/matmul/bmm_tiling.h` 进一步显示**存在两个命名空间的
-同名结构**，各自都有 `GetTiling` 重载：
+两者都有对应的 `GetTiling` 重载（`matmul_tiling_base.h:548/554`）：
 
 ```cpp
-int64_t GetTiling(optiling::TCubeTiling& tiling) override;
-int64_t GetTiling(AscendC::tiling::TCubeTiling& tiling) override;
+virtual int64_t GetTiling(optiling::TCubeTiling& tiling) = 0;
+virtual int64_t GetTiling(AscendC::tiling::TCubeTiling& tiling) = 0;
 ```
 
-**两处的 `TCubeTiling` 必须是同一类型**，否则 host 填的结构与 kernel 读的结构
-布局虽同、类型不同，可能拒绝编译。
+**本项目取 `optiling::` 版本**（与官方直调示例 `matmul_fused.asc:233-248` 一致）：
+示例中 `optiling::TCubeTiling tilingData;` 后接
+`tilingApi.GetTiling(tilingData)`，再用 `tilingData.set_stepM(1)` 这类访问器赋值。
 
-**当前按官方范例的"普通 struct"实现**（`AscendC::tiling::TCubeTiling`），
-因为那是本项目可直接对照的、已验证可编译的样例。若编译报 `TCubeTiling` 无该
-成员，改用访问器。
+> **本节此前判断有误，已改正。** 早先版本写的是"当前按官方范例的**普通 struct**
+> 实现（`AscendC::tiling::TCubeTiling`）"。那个判断来自算子工程范例
+> `docs/ref_matmul_abs_host.cpp`，但**直调模式的官方实例用的是 TilingData 类**，
+> 且带 `GetDataSize()` / `SaveToBuffer()` 等只属于该类的方法。按原判断写在
+> kernel 里会直接编译失败。
 
-附带确认：`GetTiling` 返回 `int64_t`，官方范例用 `== -1` 判失败，兼容。
+**两处类型必须一致**：host 侧填充用的类型与 device 侧读取用的类型必须是同一个，
+否则布局虽同、类型不同，可能拒绝编译。
+
+附带确认：`GetTiling` 返回 `int64_t`，官方示例用 `== -1` 判失败。
 `MultiCoreMatmulTiling` 的类注释原文："Users only need to pass information such as
 the Position, Format, and Dtype of matrices A/B/C, and by calling the API interface,
 they can get the relevant parameters from the TCubeTiling structure"。
+
+**`OQ-013` 已解决**：host 侧 tiling API 可在 `kernel.asc` 内使用。官方直调示例
+`matmul_fused.asc` 就在同一 `.asc` 内构造 `matmul_tiling::MultiCoreMatmulTiling`、
+调用 `PlatformAscendCManager::GetInstance()`，且其 host 侧函数
+`void GenerateTiling(...)`（`:203`）是**普通函数，无 `__aicore__`**。
 
 ---
 
@@ -223,15 +241,13 @@ MultiCoreMatmulTiling cubeTiling(*platformInfoMgr);
 `PlatformAscendCManager` 取得，不能自行构造**。完整说明见
 [`../platform/00_platform_mechanics.md`](../platform/00_platform_mechanics.md) §3.3。
 
-**待确认 `OQ-013`**：`run_kernel` 虽在 host 执行，但它所在的 `kernel.asc` 由
-带 `--npu-arch` 的 Ascend 编译器处理。host 侧的 `platform_ascendc` 与
-`MultiCoreMatmulTiling` 能否在同一编译单元内正常使用，**没有 Matmul 直调实例
-可直接佐证**（`gather.asc` 是 SIMT 示例）。首次提交时验证。
-
-> **若 `OQ-013` 不成立**（即 host 侧 tiling API 不可用），退路是
-> **自行推导 `TCubeTiling` 的各字段**而不依赖 tiling API。这会显著增加本文件的
-> 复杂度，且需要自行保证与 Matmul 内部预期一致。故该验证的优先级很高——
-> 它决定 §3.1 的结构体里 `cubeTilingData` 是"算出来的"还是"推导出来的"。
+**`OQ-013` 已解决**：host 侧 tiling API **可以**在 `kernel.asc` 内使用。
+官方直调示例 `matmul_fused.asc` 就在同一 `.asc` 内构造
+`matmul_tiling::MultiCoreMatmulTiling` 并调用
+`PlatformAscendCManager::GetInstance()`，其 host 侧函数
+`void GenerateTiling(...)`（`:203`）是普通函数、无 `__aicore__`。
+故 `cubeTilingData` 是"由 tiling API 算出来的"，不需要自行推导 `TCubeTiling`
+各字段。完整证据见 §3.4。
 
 ### 5.2 每个标量字段都要显式赋值
 
@@ -320,7 +336,7 @@ kernel 侧（或一个可在 CPU 上编译的等价函数）用同一批向量�
 
 ## 7. 待确认事项
 
-本文件涉及 **`I`、`J`、`K`、`L`、`OQ-013`、`OQ-015`、`OQ-016`、`OQ-017`**。
+本文件涉及 **`J`、`K`、`L`、`OQ-016`、`OQ-017`**。
 **完整列表、处置方式与状态见
 [`00_open_questions.md`](00_open_questions.md)** —— 该文件是唯一登记处，
 本节不复制其内容。
@@ -329,14 +345,19 @@ kernel 侧（或一个可在 CPU 上编译的等价函数）用同一批向量�
 
 | 编号 | 就地位置 | 事项 |
 | :--- | :--- | :--- |
-| `I` | §3.4 | `TCubeTiling` 是普通 struct 还是 TilingData 类 |
 | `J` | §3.3 | 字段用 `int32_t` 还是 `uint32_t` |
 | `K` | §4.1 | `baseM=baseN=128` 的 UB 占用能否支持双缓冲 |
 | `L` | §6 | batch 分配公式的跨语言一致性验证手段 |
-| `OQ-013` | §5.1 | host 侧 tiling API 能否在 Ascend 编译单元内使用（**优先级最高**） |
-| `OQ-015` | §3.1 | `TCubeTiling` 的定义来自哪个头文件 |
 | `OQ-016` | §3.2 | 结构体按值传递是否显著增加 launch 开销 |
 | `OQ-017` | §5.3 | Matmul 是否需要 workspace，直调下如何提供 |
+
+### 7.1 本文件已解决的事项
+
+以下不再是待确认项（结论已入册）：
+
+- `I`：`TCubeTiling` 是 **TilingData 类**，取 `optiling::TCubeTiling`，用访问器读写（§3.4）
+- `OQ-013`：host 侧 tiling API **可**在 `kernel.asc` 内使用（§5.1、§3.4）
+- `OQ-015`：所需头文件共四个，见 §3.1
 
 `01_operator_interface.md` 遗留的**原 `F`**（`K` 是否须为 `baseK` 的整数倍）
 已由 `03_matmul_layouts.md` §6 解决，结论亦登记在上述登记册第 3 节。
