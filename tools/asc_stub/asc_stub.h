@@ -20,17 +20,39 @@ namespace AscendC {
 using ::TensorInfo; using ::TensorGroupInfo;
 inline int64_t GetBlockNum() { return 1; }
 inline int64_t GetBlockIdx() { return 0; }
+enum class TPosition { GM, VECIN, VECOUT, VECCALC };
+
 template <typename T> struct GlobalTensor {
     void SetGlobalBuffer(__gm__ T*, uint32_t) {}
-    void SetValue(uint32_t, T) {}
 };
+
+template <typename T> struct LocalTensor {
+    // devkit 中 LocalTensor::SetValue 采用 uint64_t offset，此处照此建模
+    void SetValue(uint64_t, T) const {}
+};
+
+template <TPosition POS, int32_t DEPTH> struct TQue {
+    template <typename T> LocalTensor<T> AllocTensor() { return {}; }
+    template <typename T> void EnQue(const LocalTensor<T>&) {}
+    template <typename T> LocalTensor<T> DeQue() { return {}; }
+    template <typename T> void FreeTensor(const LocalTensor<T>&) {}
+};
+
+struct TPipe {
+    template <TPosition POS, int32_t DEPTH>
+    void InitBuffer(TQue<POS, DEPTH>&, int32_t, int32_t) {}
+};
+
+template <typename T>
+inline void DataCopy(const GlobalTensor<T>&, const LocalTensor<T>&, uint32_t) {}
 inline void printf(const char*, ...) {}
 }
 namespace platform_ascendc {
 class PlatformAscendC {};
 class PlatformAscendCManager {
 public:
-    static const PlatformAscendC* GetInstance(const char* = nullptr) { return nullptr; }
+    static PlatformAscendC* GetInstance() { return nullptr; }
+    static PlatformAscendC* GetInstance(const char*) { return nullptr; }
 };
 }
 namespace optiling { class TCubeTiling {}; }
