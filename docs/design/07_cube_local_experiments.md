@@ -213,3 +213,45 @@ B2 的分步标记（探针写在已有 kernel 体内）：
 4. 查 CANN 是否提供 **Cube 仿真的专门模式**（非 `--run-mode=cpu`）
 
 **注意**：结论 8 未解决前，不应假定 Cube 方案可本地验证。
+
+## 重要纠正（第二轮实测）
+
+### 纠正 1：生产路径的 `<<<>>>` 启动在仿真里【不执行】
+
+**证据**：在 `run_kernel` 的生产分支（`#else`）中插入探针核启动并紧跟 `return;`，
+输出**仍是主 kernel 的计算结果**（`y[0]=35.09`，与参考一致），而非探针写入的标记值。
+
+**含义**：`<<<>>>` 形式的启动在 CPU 仿真下被忽略（或被编译为空操作），
+因此
+
+- 之前"从生产路径启动 `__cube__` 核得到 `y[0]=111`"的结论**不成立** ——
+  那个 111 的观测是被主 kernel 后续覆盖的结果，不能作为证据。
+- **探针必须写进主 kernel 本身**（用 `GetBlockIdx()` 限核），才可靠。
+
+### 纠正 2：Cube 计算在本仿真下没有实现
+
+| 观测 | 结论 |
+| :--- | :--- |
+| `Mmad` 调用返回、不挂起 | 调用被接受 |
+| `Mmad` 前后读 L0C 均为 0 | **不做计算** |
+| `IterateAllCPU` 的实现在 `#if ASCENDC_CPU_DEBUG` 内，且要求 `ASCEND_IS_AIC` | 两个条件本项目**都不满足** |
+| Vector 的 `Mul`/`WholeReduceSum` 结果正确 | **Vector 有真实实现** |
+
+### 纠正 3：C 落 UB 的 Matmul 在编译期就失败（框架内部问题）
+
+```
+CType = MatmulType<TPosition::VECIN, CubeFormat::ND, float>
+-> kernel_operator_fixpipe_v2_impl.h:358: the 1st parameter maybe need a type '__cbuf__ half *'
+```
+
+`copy_matrix_cc_to_cbuf` 要求目标是 L1（`__cbuf__`），而模板推导出 half。
+**C 落 GM 的标准配置可以编译通过**（实测）。
+
+## 最终结论（后续按此执行）
+
+| 项 | 可本地验证 | 说明 |
+| :--- | :-: | :--- |
+| tiling / 分块 / 索引 / 归约 / 多核分配 / workspace | ✅ | 用标量路径验证 |
+| Vector 归约（`Mul`/`ReduceMax`/`WholeReduceSum`）| ✅ | 有真实实现 |
+| **Cube 矩阵乘结果** | ❌ | **仿真不算**；只能盲写 + 平台验证 |
+| **`<<<>>>` 启动的独立探针** | ❌ | **仿真不执行**；探针须写进主 kernel |
