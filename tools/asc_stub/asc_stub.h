@@ -225,3 +225,22 @@ __aicore__ inline __gm__ uint8_t* GetSysWorkSpacePtr() { return nullptr; }
 
 #define REGIST_MATMUL_OBJ(pipe, ws, obj, tiling) ((void)0)
 
+/* ---- 内核任务类型（用于 KERNEL_TASK_TYPE_DEFAULT 强制 MIX 场景）----
+ * 真实定义在 impl/basic_api/utils/kernel_utils_macros.h。
+ * 桩只需让语法检查通过；语义由 CANN 真实编译与真机把关。 */
+enum KernelMetaType : uint8_t {
+    KERNEL_TYPE_AIV_ONLY,
+    KERNEL_TYPE_AIC_ONLY,
+    KERNEL_TYPE_MIX_AIV_1_0,
+    KERNEL_TYPE_MIX_AIC_1_0,
+    KERNEL_TYPE_MIX_AIC_1_1,
+    KERNEL_TYPE_MIX_AIC_1_2,
+    KERNEL_TYPE_AICORE,
+    KERNEL_TYPE_VECTORCORE,
+    KERNEL_TYPE_MIX_AICORE,
+    KERNEL_TYPE_MIX_VECTOR_CORE,
+    KERNEL_TYPE_MAX,
+};
+#ifndef KERNEL_TASK_TYPE_DEFAULT
+#define KERNEL_TASK_TYPE_DEFAULT(value) ((void)0)
+#endif
