@@ -38,6 +38,15 @@ ASC_INCLUDES = (
     "tiling/tiling_api.h",
     "tiling/platform/platform_ascendc.h",
     "kernel_tiling/kernel_tiling.h",
+    # Matmul 高层接口：依赖链很深（kfc / matmul 全套 impl），无法用桩覆盖。
+    # 本项由【CANN 工具链的真实编译】把关（见 local_build 的 make），
+    # 桩检查只跳过它，以免产生误报。
+    "adv_api/matmul/matmul_intf.h",
+    # Cube 相关的其余头同样依赖 CANN 内部实现（kfc / matmul impl 共 4 万行），
+    # 桩覆盖不了；由 CANN 工具链的真实编译把关（local_build 的 make）。
+    "adv_api/kernel_tiling.h",
+    "basic_api/kernel_operator_swap_mem_intf.h",
+    "tiling/platform/platform_ascendc.h",
 )
 
 # 非标准 C++ 的 Ascend 语法 -> 桩写法

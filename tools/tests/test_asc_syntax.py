@@ -90,11 +90,9 @@ def test_rewrite_strips_ascend_includes():
         ("API 名拼错",
          "AscendC::GetBlockNum()",
          "AscendC::GetBlockNumX()"),
-        # 锚点刻意选取与具体实参无关的片段：早先用 "..., 2);" 作锚点，
-        # 后来该实参由字面量 2 改为 dtypeCode，测试随之失效（实测踩过）。
-        ("launch 参数个数不对",
-         "x1, x2, y, d.B, d.M, d.N, d.K,",
-         "x1, x2, y,"),
+        # launch 参数个数的检测改为**合成注入**（见 test_checker_detects_launch_arity）。
+        # 早先此处锚定 kernel.asc 里的真实启动语句，结果该语句随实现变化
+        # （diagnostic 版把它换成了平凡核）测试即失效——锚点不应绑定实现细节。
     ],
 )
 def test_checker_has_teeth(name, old, new, tmp_path):
@@ -114,3 +112,25 @@ def test_checker_has_teeth(name, old, new, tmp_path):
         capture_output=True, text=True, cwd=REPO_ROOT,
     )
     assert proc.returncode != 0, f"注入「{name}」后检查器竟然通过了"
+
+
+def test_checker_detects_launch_arity(tmp_path):
+    """launch 参数个数不对必须被检出。
+
+    用**合成代码**而非 kernel.asc 的真实启动语句：后者会随实现变化
+    （例如诊断版把启动目标换成平凡核），锚定它就等于把测试绑在实现细节上，
+    本项目已因此失效过两次。
+    """
+    broken = tmp_path / "launch_arity.asc"
+    broken.write_text(
+        "struct D { int B, M, N, K; };\n"
+        "void f(void* x1, void* x2, void* y, D d) {\n"
+        "    k<<<1, 0, s>>>(x1, x2, y, d.B, d.M);\n"   # 少了 d.N, d.K
+        "}\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, str(CHECKER), "--kernel", str(broken)],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    assert proc.returncode != 0, "launch 参数个数不符竟未被检出"
